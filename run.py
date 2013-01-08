@@ -2,8 +2,10 @@
 
 import ConfigParser
 import logging
+import multiprocessing
 from multiprocessing import Pool, Process
 from nntplib import NNTP
+import signal
 import StringIO
 import sqlite3
 from Queue import Queue
@@ -50,19 +52,22 @@ def get_nntp_connection(config):
 
 
 def group_xover(config, group, start, end):
+  start = str(start)
+  end = str(end)
+
   nntp = get_nntp_connection(config)
   LOG.info("fetching %s %s - %s ...", group, start, end)
-
   group_resp = nntp.group(group)
+  LOG.debug(group_resp)
   resp, articles = nntp.xover(start, end)
   LOG.debug(articles)
+  nntp.quit()
 
-  if False and articles:
+  if articles:
     LOG.info("storing %s %s - %s ...", group, start, end)
     for a_no, subject, poster, when, a_id, refs, sz, li in articles:
       store_article(config, a_id, group, subject)
 
-  nntp.quit()
   LOG.info("fetched %s %s - %s ...", group, start, end)
   return articles
 
@@ -80,8 +85,10 @@ def store_article(config, a_id, group, subject):
       ( a_id, group, subject, a_id ))
   database.commit()
 
+def init_worker():
+  signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-if __name__ == "__main__":
+def main():
   config = get_config()
   groups = get_groups(config)
   dstore = get_database(config, True)
@@ -93,14 +100,23 @@ if __name__ == "__main__":
     resp, count, first, last, name = nntp.group(group)
     nntp.quit()
 
+    results = []
     try:
-      nntp_p = Pool(max_connections)
+      nntp_p = Pool(max_connections, init_worker, maxtasksperchild=1)
       LOG.info('%s with %s : %s-%s', group, count, first, last)
       for start in xrange(int(last), int(first), 0-xover_span):
-        end = start - xover_span
-        nntp_p.apply_async(group_xover, (config, group, start, end))
+        results.append( nntp_p.apply_async(group_xover, (config, group, start - xover_span, start)) )
       nntp_p.close()
       nntp_p.join()
     except KeyboardInterrupt:
-        nntp_p.terminate()
-        nntp_p.join()
+      nntp_p.terminate()
+      nntp_p.join()
+
+    for result in results:
+      try:
+        LOG.debug(result.get(1))
+      except multiprocessing.TimeoutError as err:
+        LOG.error(err)
+
+if __name__ == "__main__":
+  main()
