@@ -101,5 +101,6 @@ if __name__ == "__main__":
         nntp_p.apply_async(group_xover, (config, group, start, end))
       nntp_p.close()
       nntp_p.join()
-    except () as err:
-      LOG.error(err)
+    except KeyboardInterrupt:
+        nntp_p.terminate()
+        nntp_p.join()
