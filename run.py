@@ -13,30 +13,11 @@ import thread
 import threading
 import time
 
+from cache import NNTPCache
+
 logging.basicConfig(format="%(levelname)s (%(threadName)s) %(filename)s:%(lineno)d %(message)s")
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.DEBUG)
-
-
-def get_config(config_file='defaults.cfg'):
-  config = ConfigParser.SafeConfigParser()
-  config.readfp(open(config_file))
-  return config
-
-def get_database(db_file, init=False):
-  db = sqlite3.connect('cache.db')
-  if init:
-    db.execute('CREATE TABLE IF NOT EXISTS articles('
-      'a_id NOT NULL, '
-      'group_name NOT NULL, '
-      'subject NOT NULL, '
-      'headers)')
-    db.commit()
-  return db
-
-def get_groups(config):
-  groups = config.get('indexer', 'groups').split(',')
-  return groups
 
 def get_nntp_connection(config):
   LOG.info('starting new nntp connection')
@@ -51,6 +32,33 @@ def get_nntp_connection(config):
 
 
 
+def gather_articles(config, group_name, a_no_1, a_no_2):
+  a_no_1, a_no_2 = int(a_no_1), int(a_no_2)
+  a_max, a_min = max(a_no_1, a_no_2), min(a_no_1, a_no_2)
+  xover_span = min(a_max - a_min, config.getint('indexer', 'xover_range'))
+  starts = xrange(a_max, a_min, 0-xover_span)
+  max_connections = config.getint('indexer', 'max_connections')
+
+  results = []
+  try:
+    LOG.info('starting fetch... %s %s', group_name, starts)
+    nntp_p = Pool(max_connections, init_worker, maxtasksperchild=1)
+    blah = raw_input("Go?")
+    for start in starts:
+      results.append( nntp_p.apply_async(group_xover, (config, group_name, start - xover_span, start)) )
+    nntp_p.close()
+    nntp_p.join()
+  except KeyboardInterrupt:
+    nntp_p.terminate()
+    nntp_p.join()
+
+  for result in results:
+    LOG.debug(result)
+    try:
+      LOG.debug(result.get(1))
+    except multiprocessing.TimeoutError as err:
+      LOG.error(err)
+
 def group_xover(config, group, start, end):
   start = str(start)
   end = str(end)
@@ -64,59 +72,42 @@ def group_xover(config, group, start, end):
   nntp.quit()
 
   if articles:
+    cache = NNTPCache(config)
     LOG.info("storing %s %s - %s ...", group, start, end)
     for a_no, subject, poster, when, a_id, refs, sz, li in articles:
-      store_article(config, a_id, group, subject)
+      cache.add_article(a_id, subject, group)
 
   LOG.info("fetched %s %s - %s ...", group, start, end)
-  return articles
+  cache.set_group_last_read(group, int(end))
 
-
-def store_article(config, a_id, group, subject):
-  database = get_database(config)
-  db_cursor = database.cursor()
-
-  db_cursor.execute('select * from articles where a_id = ?', (a_id,))
-  cached = db_cursor.fetchone()
-  LOG.debug('cached: %s %s', a_id, bool(cached))
-  if cached: return
-
-  db_cursor.execute('insert into articles values (?, ?, ?, ?)',
-      ( a_id, group, subject, a_id ))
-  database.commit()
 
 def init_worker():
   signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 def main():
-  config = get_config()
-  groups = get_groups(config)
-  dstore = get_database(config, True)
-  max_connections = config.getint('indexer', 'max_connections')
-  xover_span = config.getint('indexer', 'xover_range')
+  watched = ['alt.binaries.tv', 'junk']
 
-  for group in groups:
-    nntp = get_nntp_connection(config)
-    resp, count, first, last, name = nntp.group(group)
-    nntp.quit()
+  config = ConfigParser.SafeConfigParser()
+  config.readfp(open('defaults.cfg'))
 
-    results = []
-    try:
-      nntp_p = Pool(max_connections, init_worker, maxtasksperchild=1)
-      LOG.info('%s with %s : %s-%s', group, count, first, last)
-      for start in xrange(int(last), int(first), 0-xover_span):
-        results.append( nntp_p.apply_async(group_xover, (config, group, start - xover_span, start)) )
-      nntp_p.close()
-      nntp_p.join()
-    except KeyboardInterrupt:
-      nntp_p.terminate()
-      nntp_p.join()
+  nntp = get_nntp_connection(config)
+  cache = NNTPCache(config, True)
 
-    for result in results:
-      try:
-        LOG.debug(result.get(1))
-      except multiprocessing.TimeoutError as err:
-        LOG.error(err)
+  if True: # initialize group list
+    resp, group_list = nntp.list()
+    for group_name, first, last, flag in group_list:
+      cache.add_group(group_name, first, group_name in watched)
+
+  for group in cache.get_watched():
+    resp, count, first, last, group_name = nntp.group(group)
+    last_read = max(int(first), cache.get_group_last_read(group))
+    last = int(last)
+
+    LOG.debug('group: %s %d %d', group, last, last_read)
+
+    if last > last_read:
+      gather_articles(config, group_name, last_read, last)
+    cache.add_group(group_name, last)
 
 if __name__ == "__main__":
   main()
