@@ -13,23 +13,11 @@ import thread
 import threading
 import time
 
-from cache import NNTPCache
+from indexer import Indexer
 
 logging.basicConfig(format="%(levelname)s (%(threadName)s) %(filename)s:%(lineno)d %(message)s")
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.DEBUG)
-
-def get_nntp_connection(config):
-  LOG.info('starting new nntp connection')
-  nntp = NNTP(
-    config.get('indexer', 'host'),
-    config.getint('indexer', 'port'),
-    config.get('indexer', 'username'),
-    config.get('indexer', 'password'))
-  nntp.set_debuglevel(1)
-  return nntp
-
-
 
 
 def gather_articles(config, group_name, a_no_1, a_no_2):
@@ -81,33 +69,10 @@ def group_xover(config, group, start, end):
   cache.set_group_last_read(group, int(end))
 
 
-def init_worker():
-  signal.signal(signal.SIGINT, signal.SIG_IGN)
-
 def main():
-  watched = ['alt.binaries.tv', 'junk']
-
-  config = ConfigParser.SafeConfigParser()
-  config.readfp(open('defaults.cfg'))
-
-  nntp = get_nntp_connection(config)
-  cache = NNTPCache(config, True)
-
-  if True: # initialize group list
-    resp, group_list = nntp.list()
-    for group_name, first, last, flag in group_list:
-      cache.add_group(group_name, first, group_name in watched)
-
-  for group in cache.get_watched():
-    resp, count, first, last, group_name = nntp.group(group)
-    last_read = max(int(first), cache.get_group_last_read(group))
-    last = int(last)
-
-    LOG.debug('group: %s %d %d', group, last, last_read)
-
-    if last > last_read:
-      gather_articles(config, group_name, last_read, last)
-    cache.add_group(group_name, last)
+  indexer = Indexer('defaults.cfg')
+  #indexer.build_group_list()
+  indexer.update_watched()
 
 if __name__ == "__main__":
   main()
