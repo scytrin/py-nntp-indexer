@@ -1,17 +1,24 @@
+import BaseHTTPServer
 import ConfigParser
+from cStringIO import StringIO
 import logging
 import nntplib
 import signal
 import sqlite3
+
+
 
 sqlite3.enable_callback_tracebacks(True)
 logging.basicConfig(format="%(levelname)s (%(threadName)s) %(filename)s:%(lineno)d %(message)s")
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.DEBUG)
 
+
+
 class NNTPCache:
   def __init__(self, config, init=False):
     self.db = sqlite3.connect(config.get('indexer', 'cache_file'))
+    self.db.text_factory = str
     if init:
       self.db.execute('CREATE TABLE IF NOT EXISTS groups('
                       'watch BOOLEAN NOT NULL DEFAULT False, '
@@ -40,21 +47,6 @@ class NNTPCache:
     db_cursor.executemany(statement, [ (False, g) for g in group_names])
     self.db.commit()
 
-  def set_watched(self, group_name, watch=True):
-    LOG.debug((group_name, watch))
-    statement = 'UPDATE groups SET watch = ? WHERE group_name = ?'
-    db_cursor = self.db.cursor()
-    db_cursor.execute(statement, ( watch, group_name ))
-    self.db.commit()
-
-  def get_last_read(self, group_name):
-    LOG.debug((group_name,))
-    statement = 'SELECT max(number) FROM group_articles WHERE group_name = ? GROUP BY group_name'
-    db_cursor = self.db.cursor()
-    db_cursor.execute(statement, ( group_name, ))
-    result = db_cursor.fetchone()
-    return result and result[0] or 0
-
   def add_article(self, subject, group_name, message_id, number):
     LOG.debug((subject, group_name, message_id, number))
     self.add_articles([( subject, group_name, message_id, number )])
@@ -65,8 +57,8 @@ class NNTPCache:
     db_cursor = self.db.cursor()
     statement1 = 'INSERT OR REPLACE INTO articles VALUES (?, ?)'
     statement2 = 'INSERT OR REPLACE INTO group_articles VALUES (?, ?, ?)'
-    db_cursor.executemany(statement1, [ a[:2] for a in articles])
-    db_cursor.executemany(statement2, [ a[1:] for a in articles])
+    db_cursor.executemany(statement1, [ a[:2] for a in articles ])
+    db_cursor.executemany(statement2, [ a[1:] for a in articles ])
     self.db.commit()
 
   def get_article(self, message_id):
@@ -76,11 +68,34 @@ class NNTPCache:
     db_cursor.execute(statement, (message_id,))
     return db_cursor.fetchone()
 
+  def get_articles(self, group_name='*', start=0, limit=1000):
+    LOG.debug((group_name, start, limit))
+    statement = 'SELECT * FROM articles LIMIT 100;'
+    db_cursor = self.db.cursor()
+    db_cursor.execute(statement)
+    return db_cursor.fetchall()
+
+  def get_last_read(self, group_name):
+    LOG.debug((group_name,))
+    statement = 'SELECT max(number) FROM group_articles WHERE group_name = ? GROUP BY group_name'
+    db_cursor = self.db.cursor()
+    db_cursor.execute(statement, ( group_name, ))
+    result = db_cursor.fetchone()
+    return result and result[0] or 0
+
+  def set_watched(self, group_name, watch=True):
+    LOG.debug((group_name, watch))
+    statement = 'UPDATE groups SET watch = ? WHERE group_name = ?'
+    db_cursor = self.db.cursor()
+    db_cursor.execute(statement, ( watch, group_name ))
+    self.db.commit()
+
   def get_watched(self):
     statement = 'SELECT group_name FROM groups WHERE watch'
     db_cursor = self.db.cursor()
     db_cursor.execute(statement)
     return [ row[0] for row in db_cursor ]
+
 
 
 class NNTP(nntplib.NNTP):
@@ -90,8 +105,43 @@ class NNTP(nntplib.NNTP):
     self.quit()
 
 
+
+class HTTPServer(BaseHTTPServer.HTTPServer):
+  class IndexerView(BaseHTTPServer.BaseHTTPRequestHandler):
+    BASE_PAGE = '<!DOCTYPE>\n<html><head>\n\t<title>\'dex</title>\n</head><body>%s</body></html>'
+    ARTICLE = '<div>%s</div>'
+    def header_index(self):
+      cache = self.server.cache
+      buf = StringIO()
+      for article in cache.get_articles(limit=100):
+        buf.write(self.ARTICLE % article[0])
+      return self.BASE_PAGE % buf.getvalue()
+
+    def do_GET(self):
+      self.send_response(200)
+      self.send_header('Content-type', 'text/html')
+      self.end_headers()
+      self.wfile.write(self.header_index())
+      return
+
+  def __init__(self, config):
+    self.config = config
+    host = self.config.get('server', 'host')
+    port = self.config.getint('server', 'port')
+    BaseHTTPServer.HTTPServer.__init__(self, (host, port), self.IndexerView)
+
+  @property
+  def cache(self):
+    return NNTPCache(self.config)
+
+  def start(self):
+    try: self.serve_forever()
+    except KeyboardInterrupt: self.socket.close()
+
+
+
 class Indexer:
-  def __init__(self, config_file):
+  def __init__(self, config_file='defaults.cfg'):
     self.config = ConfigParser.SafeConfigParser()
     self.config.readfp(open(config_file))
     self.max_connections = self.config.getint('indexer', 'max_connections')
@@ -106,6 +156,14 @@ class Indexer:
         True)
     nntp.set_debuglevel(1)
     return nntp
+
+  def _new_http_server(self):
+    http = HTTPServer(self.config)
+    return http
+
+  @property
+  def http(self):
+    return self._new_http_server()
 
   @property
   def nntp(self):
@@ -147,3 +205,10 @@ class Indexer:
 
 def init_worker():
   signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def main():
+  indexer = Indexer('defaults.cfg')
+  indexer.http.start()
+  #indexer.build_group_list()
+  #indexer.update_watched()
