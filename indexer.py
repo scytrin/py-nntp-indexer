@@ -1,4 +1,7 @@
+#!/usr/bin/python2.7
+
 import BaseHTTPServer
+import urlparse
 import ConfigParser
 from cStringIO import StringIO
 import logging
@@ -19,7 +22,8 @@ LOG.setLevel(logging.DEBUG)
 
 class NNTPCache:
   def __init__(self, config, init=False):
-    self.db = sqlite3.connect(config.get('indexer', 'cache_file'))
+    self.db = sqlite3.connect(config.get('indexer', 'cache_file'),
+                              detect_types=sqlite3.PARSE_DECLTYPES)
     self.db.text_factory = str
     if init:
       self.db.execute('CREATE TABLE IF NOT EXISTS groups('
@@ -27,6 +31,7 @@ class NNTPCache:
                       'group_name NOT NULL, '
                       'UNIQUE(group_name) ON CONFLICT REPLACE)')
       self.db.execute('CREATE TABLE IF NOT EXISTS articles('
+                      'post_date TIMESTAMP NOT NULL, '
                       'subject NOT NULL, '
                       'message_id NOT NULL, '
                       'UNIQUE(message_id) ON CONFLICT REPLACE)')
@@ -67,7 +72,7 @@ class NNTPCache:
     self.add_articles([( subject, group_name, message_id, number )])
 
   def add_articles(self, articles):
-    # [ (subject, message_id, group, number), ... ]
+    # [ (post_date, subject, message_id, group, number), ... ]
     LOG.debug((len(articles), articles[0]))
     statement1 = 'INSERT OR REPLACE INTO articles VALUES (?, ?)'
     arguments1 = [ a[:2] for a in articles ]
@@ -91,11 +96,16 @@ class NNTPCache:
     db_cursor.execute(statement, (message_id,))
     return db_cursor.fetchone()
 
-  def get_articles(self, group_name='*', start=0, limit=1000):
+  def get_articles(self, group_name='*', start=0, limit=1000, fragment=None):
     LOG.debug((group_name, start, limit))
-    statement = 'SELECT * FROM articles LIMIT 100;'
+    statement = 'SELECT * FROM articles %s LIMIT 100;'
+    if not fragment:
+      db_cursor = self.db.cursor()
+      db_cursor.execute(statement % '')
+      return db_cursor.fetchall()
+
     db_cursor = self.db.cursor()
-    db_cursor.execute(statement)
+    db_cursor.execute(statement % 'WHERE subject LIKE ?', (fragment, ))
     return db_cursor.fetchall()
 
   def get_last_read(self, group_name):
@@ -227,7 +237,7 @@ class Indexer:
         with self.cache_connection as cache:
           LOG.info("storing %s: %s - %s ...", group, start, end)
           # a_no, subject, poster, when, a_id, refs, sz, li
-          cache.add_articles([ (a[1], a[4], group, a[0]) for a in articles ])
+          cache.add_articles([ (a[3], a[1], a[4], group, a[0]) for a in articles ])
     except KeyboardInterrupt:
       #LOG.critical('KB INTERRUPT')
       return
@@ -236,22 +246,33 @@ class Indexer:
 
 class HTTPServer(BaseHTTPServer.HTTPServer):
   class IndexerView(BaseHTTPServer.BaseHTTPRequestHandler):
-    BASE_PAGE = '<!DOCTYPE>\n<html><head>\n\t<title>\'dex</title>\n</head><body>%s</body></html>'
-    ARTICLE = '<div>%s</div>\n'
+    BASE_PAGE_HEAD = '<!DOCTYPE>\n<html><head>\n\t<title>\'dex</title>\n</head><body>'
+    BASE_PAGE_FOOT = '</body></html>'
+    DIV = '<div>%s</div>\n'
 
-    def header_index(self):
+    def header_index(self, out):
       with self.server.indexer.cache_connection as cache:
-        articles = cache.get_articles(limit=100)
-      buf = StringIO()
+        articles = cache.get_articles(limit=100, fragment=self.path[1:])
       for article in articles:
-        buf.write(self.ARTICLE % article[0])
-      return self.BASE_PAGE % buf.getvalue()
+        out.write(self.DIV % article[0])
+
+    def do_POST(self):
+      url = urlparse.urlparse(self.path)
+      LOG.debug(url)
+      return
+
 
     def do_GET(self):
       self.send_response(200)
       self.send_header('Content-type', 'text/html')
       self.end_headers()
-      self.wfile.write(self.header_index())
+      self.wfile.write(self.BASE_PAGE_HEAD)
+      self.wfile.write(
+          '''<form onsubmit="window.location.pathname = '/' + this['query'].value; return false;">'''
+          '<input name="query" value="' + self.path[1:] + '" />'
+          '</form>')
+      self.header_index(self.wfile)
+      self.wfile.write(self.BASE_PAGE_FOOT)
       return
 
   def __init__(self, config_file='defaults.cfg'):
@@ -259,6 +280,7 @@ class HTTPServer(BaseHTTPServer.HTTPServer):
     self.config = self.indexer.config
     host = self.config.get('server', 'host')
     port = self.config.getint('server', 'port')
+    LOG.info('Setting up server on %s:%d', host, port)
     BaseHTTPServer.HTTPServer.__init__(self, (host, port), self.IndexerView)
 
   def start(self):
@@ -269,3 +291,15 @@ class HTTPServer(BaseHTTPServer.HTTPServer):
 def main():
   app = HTTPServer()
   app.start()
+  return
+
+  app = indexer.Indexer('defaults.cfg')
+  app.build_group_list()
+  with app.cache_connection as cache:
+    cache.set_watched('alt.binaries.tv', True)
+    cache.set_watched('alt.binaries.hdtv', True)
+  app.update_watched()
+
+
+if __name__ == '__main__':
+  main()
