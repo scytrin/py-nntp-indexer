@@ -1,17 +1,27 @@
 #!/usr/bin/python2.7
 
 import BaseHTTPServer
-import urlparse
+import calendar
+import cgi
 import ConfigParser
 from cStringIO import StringIO
+from datetime import datetime, timedelta
+import email.utils
+import json
 import logging
 import nntplib
 from multiprocessing import BoundedSemaphore, Process, Queue
 import random
 import signal
+import string
 import sqlite3
 import sys
+from threading import Thread
 import time
+from urlparse import parse_qs, urlparse
+import wsgiref
+from wsgiref.simple_server import make_server
+from wsgiref.util import FileWrapper
 
 sqlite3.enable_callback_tracebacks(True)
 logging.basicConfig(format="%(levelname)s (%(processName)s:%(threadName)s) %(filename)s:%(lineno)d %(message)s")
@@ -22,6 +32,7 @@ LOG.setLevel(logging.DEBUG)
 
 class NNTPCache:
   def __init__(self, config, init=False):
+    sqlite3.register_converter("timestamp", lambda b: calendar.timegm(time.strptime(b, '%Y-%m-%d %H:%M:%S')))
     self.db = sqlite3.connect(config.get('indexer', 'cache_file'),
                               detect_types=sqlite3.PARSE_DECLTYPES)
     self.db.text_factory = str
@@ -48,36 +59,17 @@ class NNTPCache:
   def __exit__(self, type, value, traceback):
     self.db.close()
 
-  def add_group(self, group_name):
-    LOG.debug((group_name,))
-    self.add_groups([(group_name,)])
-
-  def add_groups(self, group_names):
-    # [ (group_name,), ... ]
-    #LOG.debug((len(group_names), group_names))
-    statement = 'INSERT OR REPLACE INTO groups VALUES (?, ?)'
-    arguments = [ (False, g[0]) for g in group_names]
-    db_cursor = self.db.cursor()
-    while True:
-      try:
-        db_cursor.executemany(statement, arguments)
-        self.db.commit()
-        break
-      except sqlite3.OperationalError as err:
-        LOG.error(err)
-        time.sleep(random.randint(1,3))
-
   def add_article(self, subject, group_name, message_id, number):
     LOG.debug((subject, group_name, message_id, number))
-    self.add_articles([( subject, group_name, message_id, number )])
+    self.add_articles([[ subject, group_name, message_id, number ]])
 
   def add_articles(self, articles):
     # [ (post_date, subject, message_id, group, number), ... ]
     LOG.debug((len(articles), articles[0]))
-    statement1 = 'INSERT OR REPLACE INTO articles VALUES (?, ?)'
-    arguments1 = [ a[:2] for a in articles ]
+    statement1 = 'INSERT OR REPLACE INTO articles VALUES (?, ?, ?)'
+    arguments1 = [ a[:3] for a in articles ]
     statement2 = 'INSERT OR REPLACE INTO group_articles VALUES (?, ?, ?)'
-    arguments2 = [ a[1:] for a in articles ]
+    arguments2 = [ a[2:] for a in articles ]
     db_cursor = self.db.cursor()
     while True:
       try:
@@ -96,16 +88,20 @@ class NNTPCache:
     db_cursor.execute(statement, (message_id,))
     return db_cursor.fetchone()
 
-  def get_articles(self, group_name='*', start=0, limit=1000, fragment=None):
-    LOG.debug((group_name, start, limit))
-    statement = 'SELECT * FROM articles %s LIMIT 100;'
-    if not fragment:
-      db_cursor = self.db.cursor()
-      db_cursor.execute(statement % '')
-      return db_cursor.fetchall()
+  def get_articles(self, query=None, limit=100, offset=0):
+    LOG.debug((limit, offset, query))
 
+    if query:
+      statement = 'SELECT * FROM articles WHERE subject LIKE ? ORDER BY post_date LIMIT ? OFFSET ?'
+      parameters = ['%%%s%%' % str(query), int(limit), int(limit*offset)]
+    else:
+      statement = 'SELECT * FROM articles LIMIT ? OFFSET ?'
+      parameters = [int(limit), int(limit*offset)]
+
+    LOG.debug(statement)
+    LOG.debug(parameters)
     db_cursor = self.db.cursor()
-    db_cursor.execute(statement % 'WHERE subject LIKE ?', (fragment, ))
+    db_cursor.execute(statement, parameters)
     return db_cursor.fetchall()
 
   def get_last_read(self, group_name):
@@ -115,6 +111,41 @@ class NNTPCache:
     db_cursor.execute(statement, ( group_name, ))
     result = db_cursor.fetchone()
     return result and result[0] or 0
+
+  def add_group(self, group_name):
+    LOG.debug((group_name,))
+    self.add_groups([(group_name,)])
+
+  def add_groups(self, group_names):
+    # [ (group_name,), ... ]
+    #LOG.debug((len(group_names), group_names))
+    statement = 'INSERT OR REPLACE INTO groups(group_name) VALUES (?)'
+    arguments = group_names
+    db_cursor = self.db.cursor()
+    while True:
+      try:
+        db_cursor.executemany(statement, arguments)
+        self.db.commit()
+        break
+      except sqlite3.OperationalError as err:
+        LOG.error(err)
+        time.sleep(random.randint(1,3))
+
+  def get_groups(self, query=None, limit=100, offset=0):
+    LOG.debug((limit, offset, query))
+
+    if query:
+      statement = 'SELECT * FROM groups WHERE group_name LIKE ? ORDER BY group_name LIMIT ? OFFSET ?'
+      parameters = ['%%%s%%' % str(query), int(limit), int(limit*offset)]
+    else:
+      statement = 'SELECT * FROM groups ORDER BY group_name LIMIT ? OFFSET ?'
+      parameters = [int(limit), int(limit*offset)]
+
+    LOG.debug(statement)
+    LOG.debug(parameters)
+    db_cursor = self.db.cursor()
+    db_cursor.execute(statement, parameters)
+    return db_cursor.fetchall()
 
   def set_watched(self, group_name, watch=True):
     LOG.debug((group_name, watch))
@@ -134,7 +165,7 @@ class NNTPCache:
     statement = 'SELECT group_name FROM groups WHERE watch'
     db_cursor = self.db.cursor()
     db_cursor.execute(statement)
-    return [ row[0] for row in db_cursor ]
+    return [ row[0] for row in db_cursor if row ]
 
 
 
@@ -161,7 +192,13 @@ class Indexer:
     self.config = ConfigParser.SafeConfigParser()
     self.config.readfp(open(config_file))
 
+    self.action_queue = Queue()
     self.actions = BoundedSemaphore(20)
+    self.starter = Thread(target=self.action_starter, name='starter',
+                          args=(self.action_queue,))
+    self.starter.daemon = True
+    self.starter.start()
+
     self.nntp_c = NNTPCache(self.config, True)
     max_connections = self.config.getint('indexer', 'max_connections')
     self.nntp_semaphore = BoundedSemaphore(max_connections)
@@ -182,6 +219,9 @@ class Indexer:
   def cache_connection(self):
     return NNTPCache(self.config)
 
+  def update_groups(self):
+    self.build_group_list()
+
   def update_watched(self):
     with self.cache_connection as cache:
       for watched in cache.get_watched():
@@ -196,24 +236,35 @@ class Indexer:
       last_read = max(int(first), last_read)
       last = int(last)
 
-    LOG.debug('group: %s %d %d', group, last, last_read)
+    LOG.debug('update_group: %s %d %d', group, last, last_read)
 
     if last > last_read:
       for start in xrange(last_read, last, span):
         end = min(last, start + span)
-        self.start_action(self.fetch_group_articles, (group, start, end),
-            'get_group_articles %s %s %s' % (group, start, end))
+        self.do('fetch', group, start, end)
+        #self.start_action(self.fetch_group_articles, (group, start, end),
+        #    'get_group_articles %s %s %s' % (group, start, end))
 
+  def do(self, *args):
+    self.action_queue.put(args)
 
   # Actions, may be in a process or thread! Beware DB locking!
-  def start_action(self, func, args, name=None):
-    with self.actions:
-      proc = Process(name=name, target=func, args=args)
-      proc.daemon = True
-    proc.start() # possible deadlock if in the with statement
-    return proc
+  def action_starter(self, queue):
+    while True:
+      proc = None
+      args = list(queue.get())
+      action = args.pop(0)
+      LOG.debug(args)
+      with self.actions:
+        if action == 'fetch':
+          proc = Thread(target=self.fetch_group_articles, args=args)
+          proc.daemon = True
+        else:
+          LOG.error('Invalid action provided: %s', action)
+      if proc:
+        proc.start() # possible deadlock if in the with statement
 
-  def build_group_list(self):
+  def build_group_list(self, all=False):
     try:
       with self.actions:
         with self.nntp_connection as nntp:
@@ -233,72 +284,130 @@ class Indexer:
           LOG.info("fetching %s: %s - %s ...", group, start, end)
           group_resp = nntp.group(group)
           resp, articles = nntp.xover(str(start), str(end))
+          LOG.debug('articles recieved')
 
         with self.cache_connection as cache:
           LOG.info("storing %s: %s - %s ...", group, start, end)
           # a_no, subject, poster, when, a_id, refs, sz, li
-          cache.add_articles([ (a[3], a[1], a[4], group, a[0]) for a in articles ])
+          for a in articles:
+            t = email.utils.parsedate_tz(a[3])
+            a[3] = datetime(*t[:6]) - timedelta(seconds=t[-1])
+          cache.add_articles([ [a[3], a[1], a[4], group, a[0]] for a in articles ])
     except KeyboardInterrupt:
       #LOG.critical('KB INTERRUPT')
       return
 
 
 
-class HTTPServer(BaseHTTPServer.HTTPServer):
-  class IndexerView(BaseHTTPServer.BaseHTTPRequestHandler):
-    BASE_PAGE_HEAD = '<!DOCTYPE>\n<html><head>\n\t<title>\'dex</title>\n</head><body>'
-    BASE_PAGE_FOOT = '</body></html>'
-    DIV = '<div>%s</div>\n'
+class IndexServer:
+  @classmethod
+  def start(self, config_file='defaults.cfg'):
+    indexer = Indexer(config_file)
+    host = indexer.config.get('server', 'host')
+    port = indexer.config.getint('server', 'port')
+    def inject_indexer(environ, start_response):
+      environ['indexer'] = indexer
+      return self(environ, start_response)
+    make_server(host, port, inject_indexer).serve_forever()
 
-    def header_index(self, out):
-      with self.server.indexer.cache_connection as cache:
-        articles = cache.get_articles(limit=100, fragment=self.path[1:])
-      for article in articles:
-        out.write(self.DIV % article[0])
+  def __init__(self, environ, start_response):
+    self.environ = environ
+    self.start = start_response
+    self.path_info = urlparse(self['PATH_INFO'])
+    self.query = parse_qs(self['QUERY_STRING'])
+    self._post_params = None
 
-    def do_POST(self):
-      url = urlparse.urlparse(self.path)
-      LOG.debug(url)
-      return
+  def __getitem__(self, key):
+    return self.environ[key]
 
+  @property
+  def indexer(self):
+    return self['indexer']
 
-    def do_GET(self):
-      self.send_response(200)
-      self.send_header('Content-type', 'text/html')
-      self.end_headers()
-      self.wfile.write(self.BASE_PAGE_HEAD)
-      self.wfile.write(
-          '''<form onsubmit="window.location.pathname = '/' + this['query'].value; return false;">'''
-          '<input name="query" value="' + self.path[1:] + '" />'
-          '</form>')
-      self.header_index(self.wfile)
-      self.wfile.write(self.BASE_PAGE_FOOT)
-      return
+  @property
+  def post_params(self):
+    if not self._post_params:
+      self._post_params = {}
+      if self.environ['REQUEST_METHOD'].upper() == 'POST':
+        content_type = self.environ.get('CONTENT_TYPE', 'application/x-www-form-urlencoded')
+        if (content_type.startswith('application/x-www-form-urlencoded')
+            or content_type.startswith('multipart/form-data')):
+          try:
+            request_body_size = int(self.environ.get('CONTENT_LENGTH', 0))
+          except (ValueError):
+            request_body_size = 0
+          self._post_params = parse_qs(self['wsgi.input'].read(request_body_size))
+          LOG.debug(self._post_params)
+    return self._post_params
 
-  def __init__(self, config_file='defaults.cfg'):
-    self.indexer = Indexer(config_file)
-    self.config = self.indexer.config
-    host = self.config.get('server', 'host')
-    port = self.config.getint('server', 'port')
-    LOG.info('Setting up server on %s:%d', host, port)
-    BaseHTTPServer.HTTPServer.__init__(self, (host, port), self.IndexerView)
+  def params(self, key, *default, **kw):
+    which = kw.get('which', 0)
+    transform = kw.get('transform', lambda x: x)
+    params = map(transform, self.query.get(key, default))
+    if which is None:
+      return params
+    elif len(params) > which:
+      return params[which]
+    elif len(default) > which:
+      return default[which]
+    else:
+      return None
 
-  def start(self):
-    try: self.serve_forever()
-    except KeyboardInterrupt: self.socket.close()
+  def __iter__(self):
+    if self['REQUEST_METHOD'] == 'POST' and self.path_info.path == '/':
+      pass
+    elif self['REQUEST_METHOD'] == 'GET':
+      func_name = self.path_info.path.lstrip('/').split('/')[0]
+      if func_name == '':
+        func_name = 'index'
+      return getattr(self, func_name, self.err_404)()
+    else:
+      return err_405()
+
+  def err_404(self):
+    self.start('404 Not Found', [('Content-Type', 'test/plain')])
+    yield 'nothing found!!!'
+
+  def err_405(self):
+    self.start('405 Method Not Allowed', [('Content-Type', 'test/plain')])
+    yield 'Not allowed!'
+
+  def index(self):
+    self.start('200 OK', [('Content-type', 'text/html')])
+    return FileWrapper(open('index.html'))
+
+  def groups(self):
+    query = self.params('q', '', which=-1)
+    limit = self.params('l', 100, transform=int)
+    offset = self.params('o', 0, transform=int)
+    LOG.debug((query, limit, offset))
+    with self.indexer.cache_connection as cache:
+      groups = cache.get_groups(query, limit, offset)
+    self.start('200 OK', [('Content-type', 'application/json')])
+    yield json.dumps(groups)
+
+  def articles(self):
+    query = self.params('q', '', which=-1)
+    limit = self.params('l', 100, transform=int)
+    offset = self.params('o', 0, transform=int)
+    LOG.debug((query, limit, offset))
+    with self.indexer.cache_connection as cache:
+      articles = cache.get_articles(query, limit, offset)
+    self.start('200 OK', [('Content-type', 'application/json')])
+    yield json.dumps(articles)
+
 
 
 def main():
-  app = HTTPServer()
-  app.start()
-  return
-
-  app = indexer.Indexer('defaults.cfg')
-  app.build_group_list()
-  with app.cache_connection as cache:
-    cache.set_watched('alt.binaries.tv', True)
-    cache.set_watched('alt.binaries.hdtv', True)
-  app.update_watched()
+  if True:
+    IndexServer.start()
+  else:
+    app = Indexer('defaults.cfg')
+    app.build_group_list()
+    with app.cache_connection as cache:
+      cache.set_watched('alt.binaries.tv', True)
+      cache.set_watched('alt.binaries.hdtv', True)
+    app.update_watched()
 
 
 if __name__ == '__main__':

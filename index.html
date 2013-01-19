@@ -1,0 +1,56 @@
+<html>
+  <head>
+    <title>Use'dex</title>
+    <style type='text/css'>
+      .group_item .group_name {
+        text-align: left;
+        border-bottom: 1px solid black;
+      }
+    </style>
+    <script src="//ajax.googleapis.com/ajax/libs/jquery/1.8.3/jquery.min.js"></script>
+    <script src="//ajax.googleapis.com/ajax/libs/jqueryui/1.9.2/jquery-ui.min.js"></script>
+    <script type='text/javascript'>
+      // Oh Hai!
+var list_groups = function(q, o, l) {
+  $('#content').empty();
+  $.getJSON('/groups', {q: 'binaries.tv'}, function(data){
+    $.each(data, function(k, v) {
+        list_group(v);
+        });
+  });
+}
+var list_group = function(group) {
+  console.log(group);
+  var item = $('#template .group_item').clone();
+  $('#content').append(item);
+  $(item).children('.watch_toggle').prop('checked', !!group[0]);
+  $(item).children('.group_name').text(group[1]);
+}
+    </script>
+  </head>
+  <body onload='list_groups()'>
+
+    <form method="get">
+      <button id='group_select'>Group</button>
+      <button id='article_select'>Article</button>
+      &nbsp;|&nbsp;
+      <input id='query' />
+      <button id='do_query'>Filter</button>
+      &nbsp;|&nbsp;
+      <button id='go_less'>&larr;</button>
+      <button id='go_more'>&rarr;</button>
+    </form>
+
+    <table id='content'>
+    </table>
+
+    <table id='template'>
+      <tr class='article_item'>
+      </tr>
+      <tr class='group_item'>
+        <td><input type='checkbox' class='watch_toggle' /></td>
+        <td class='group_name'></td>
+      </tr>
+    </table>
+  </body>
+</html>
