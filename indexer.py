@@ -38,7 +38,7 @@ class NNTPCache:
     self.db.text_factory = str
     if init:
       self.db.execute('CREATE TABLE IF NOT EXISTS groups('
-                      'watch BOOLEAN NOT NULL DEFAULT False, '
+                      'watch BOOLEAN NOT NULL DEFAULT 0, '
                       'group_name NOT NULL, '
                       'UNIQUE(group_name) ON CONFLICT REPLACE)')
       self.db.execute('CREATE TABLE IF NOT EXISTS articles('
@@ -278,6 +278,11 @@ class Indexer:
       return
 
   def fetch_group_articles(self, group, start, end):
+    def for_cache(article):
+      t = email.utils.parsedate_tz(a[3])
+      posted = datetime(*t[:6]) - timedelta(seconds=t[-1])
+      return posted, article[1], article[4], group, article[0]
+
     try:
       with self.actions:
         with self.nntp_connection as nntp:
@@ -289,10 +294,7 @@ class Indexer:
         with self.cache_connection as cache:
           LOG.info("storing %s: %s - %s ...", group, start, end)
           # a_no, subject, poster, when, a_id, refs, sz, li
-          for a in articles:
-            t = email.utils.parsedate_tz(a[3])
-            a[3] = datetime(*t[:6]) - timedelta(seconds=t[-1])
-          cache.add_articles([ [a[3], a[1], a[4], group, a[0]] for a in articles ])
+          cache.add_articles(map(articles, for_cache))
     except KeyboardInterrupt:
       #LOG.critical('KB INTERRUPT')
       return
@@ -355,7 +357,7 @@ class IndexServer:
 
   def __iter__(self):
     if self['REQUEST_METHOD'] == 'POST' and self.path_info.path == '/':
-      pass
+      return self.process_post()
     elif self['REQUEST_METHOD'] == 'GET':
       func_name = self.path_info.path.lstrip('/').split('/')[0]
       if func_name == '':
@@ -363,6 +365,25 @@ class IndexServer:
       return getattr(self, func_name, self.err_404)()
     else:
       return err_405()
+
+  def process_post(self):
+    self.start('200 OK', [('Content-type', 'text/plain')])
+    if self.post_params.get('reload_groups', False):
+      self.indexer.update_groups()
+      yield "Reloading groups..."
+    if self.post_params.get('fetch_articles', False):
+      self.indexer.update_watched()
+      yield "Fetching articles of watched groups..."
+    if 'watch' in self.post_params:
+      with self.indexer.cache_connection as cache:
+        for group in self.post_params['watch']:
+          cache.set_watched(group, True)
+          yield "Watching %s" % group
+    if 'unwatch' in self.post_params:
+      with self.indexer.cache_connection as cache:
+        for group in self.post_params['unwatch']:
+          cache.set_watched(group, False)
+          yield "Not watching %s" % group
 
   def err_404(self):
     self.start('404 Not Found', [('Content-Type', 'test/plain')])
@@ -376,23 +397,23 @@ class IndexServer:
     self.start('200 OK', [('Content-type', 'text/html')])
     return FileWrapper(open('index.html'))
 
-  def groups(self):
+  def find_items(self, func):
     query = self.params('q', '', which=-1)
     limit = self.params('l', 100, transform=int)
     offset = self.params('o', 0, transform=int)
     LOG.debug((query, limit, offset))
+    return func(query, limit, offset)
+
+  def groups(self):
     with self.indexer.cache_connection as cache:
-      groups = cache.get_groups(query, limit, offset)
+      groups = self.find_items(cache.get_groups)
+    LOG.debug(groups)
     self.start('200 OK', [('Content-type', 'application/json')])
     yield json.dumps(groups)
 
   def articles(self):
-    query = self.params('q', '', which=-1)
-    limit = self.params('l', 100, transform=int)
-    offset = self.params('o', 0, transform=int)
-    LOG.debug((query, limit, offset))
     with self.indexer.cache_connection as cache:
-      articles = cache.get_articles(query, limit, offset)
+      articles = self.find_items(cache.get_articles)
     self.start('200 OK', [('Content-type', 'application/json')])
     yield json.dumps(articles)
 

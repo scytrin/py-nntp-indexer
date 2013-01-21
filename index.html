@@ -2,7 +2,8 @@
   <head>
     <title>Use'dex</title>
     <style type='text/css'>
-      .group_item .group_name {
+      #template { display:none; }
+      .group.item .name {
         text-align: left;
         border-bottom: 1px solid black;
       }
@@ -11,45 +12,108 @@
     <script src="//ajax.googleapis.com/ajax/libs/jqueryui/1.9.2/jquery-ui.min.js"></script>
     <script type='text/javascript'>
       // Oh Hai!
-var list_groups = function(q, o, l) {
+var LIST = [null, null];
+var list = function(url, func) {
+  LIST = [ url, func ];
+  $('#offset').val(0);
+  return relist();
+};
+var relist = function() {
+  if(!(LIST[0] && LIST[1])) {
+    console.log('LIST is unset');
+    return false;
+  }
+
   $('#content').empty();
-  $.getJSON('/groups', {q: 'binaries.tv'}, function(data){
-    $.each(data, function(k, v) {
-        list_group(v);
-        });
-  });
-}
-var list_group = function(group) {
+  $.getJSON(LIST[0], {
+      'q': $('#query').val(),
+      'l': $('#limit').val(),
+      'o': $('#offset').val()
+    },
+    function(d){
+      $.each(d, LIST[1]);
+    });
+  return false;
+};
+
+var toggle_watch = function(e) {
+  var data = {};
+  var toggle = $(e.target);
+  var watch = toggle.prop('checked') ? 'watch' : 'unwatch';
+  data[watch] = toggle.val();
+  $.post('/', data);
+};
+var groups = function() { return list('/groups', group_item); };
+var group_item = function(idx, group) {
   console.log(group);
-  var item = $('#template .group_item').clone();
+  var item = $('#template .item.group').clone();
   $('#content').append(item);
-  $(item).children('.watch_toggle').prop('checked', !!group[0]);
-  $(item).children('.group_name').text(group[1]);
-}
+  $(item).find('.name').text(group[1]);
+  $(item).find('.toggle.watch')
+    .prop('checked', !!group[0] && group[0] != 'False')
+    .change(toggle_watch)
+    .val(group[1]);
+};
+
+var articles = function() { return list('/articles', article_item); };
+var article_item = function(idx, article) {
+  console.log(article);
+  var item = $('#template .item.article').clone();
+  $('#content').append(item);
+  $(item).find('.id').text(article[1]);
+  $(item).find('.name').text(article[0]);
+};
+
+var init = function() {
+  $("#query_groups").click(groups);
+  $("#query_articles").click(articles);
+  $("#go_less").click(function(){
+    var o = $('#offset');
+    o.val(Math.max(0, parseInt(o.val())-1));
+    return relist();
+  });
+  $("#go_more").click(function(){
+    var o = $('#offset');
+    o.val(parseInt(o.val())+1);
+    return relist();
+  });
+  $('#reload_groups').click(function(){
+    $.post('/', {'reload_groups': true})
+  });
+  $('#fetch_articles').click(function(){
+    $.post('/', {'fetch_articles': true})
+  });
+};
     </script>
   </head>
-  <body onload='list_groups()'>
+  <body onload="init()">
 
-    <form method="get">
-      <button id='group_select'>Group</button>
-      <button id='article_select'>Article</button>
-      &nbsp;|&nbsp;
-      <input id='query' />
-      <button id='do_query'>Filter</button>
+    <div id='controls'>
+      <input id='query' type='text' />
+      <button id='query_groups'>Find Groups</button>
+      <button id='query_articles'>Find Articles</button>
       &nbsp;|&nbsp;
       <button id='go_less'>&larr;</button>
       <button id='go_more'>&rarr;</button>
-    </form>
+      <input id='limit' type='hidden' name='limit' value='100' />
+      <input id='offset' type='hidden' name='offset' value='0' />
+      &nbsp;|&nbsp;
+      <button id='reload_groups'>Reload groups</button>
+      <button id='fetch_articles'>Fetch articles</button>
+    </div>
 
     <table id='content'>
     </table>
 
     <table id='template'>
-      <tr class='article_item'>
+      <tr class='item article'>
+        <td class='date'></td>
+        <td class='name'></td>
+        <td class='id'></td>
       </tr>
-      <tr class='group_item'>
-        <td><input type='checkbox' class='watch_toggle' /></td>
-        <td class='group_name'></td>
+      <tr class='item group'>
+        <td><input type='checkbox' class='toggle watch' name='watch_group' /></td>
+        <td class='name'></td>
       </tr>
     </table>
   </body>
