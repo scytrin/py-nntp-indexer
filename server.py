@@ -1,3 +1,4 @@
+import gviz_api
 import json
 import logging
 from urlparse import parse_qs, urlparse
@@ -5,7 +6,7 @@ import wsgiref
 from wsgiref.simple_server import make_server
 from wsgiref.util import FileWrapper
 
-from indexer import Indexer
+from __init__ import Indexer
 
 logging.basicConfig(format="%(levelname)s (%(processName)s:%(threadName)s) %(filename)s:%(lineno)d %(message)s")
 LOG = logging.getLogger(__name__)
@@ -108,24 +109,37 @@ class IndexServer:
     return FileWrapper(open('index.html'))
 
   def find_items(self, func):
-    query = self.params('q', '', which=-1)
-    limit = self.params('l', 100, transform=int)
-    offset = self.params('o', 0, transform=int)
-    LOG.debug((query, limit, offset))
-    return func(query, limit, offset)
+    query = self.params('query', '', which=-1)
+    offset = self.params('page', 0, transform=int)
+    return func(query, offset)
 
   def groups(self):
     with self.indexer.cache_connection as cache:
       groups = self.find_items(cache.get_groups)
-    LOG.debug(groups)
+    if not groups:
+      self.indexer._build_group_list()
+      with self.indexer.cache_connection as cache:
+        groups = self.find_items(cache.get_groups)
+    dt = gviz_api.DataTable([
+        ('watch', 'boolean', 'Watched'),
+        ('group_name', 'string', 'Name')
+        ])
+    dt.LoadData(groups)
     self.start('200 OK', [('Content-type', 'application/json')])
-    yield json.dumps(groups)
+    yield dt.ToJSon()
 
   def articles(self):
     with self.indexer.cache_connection as cache:
       articles = self.find_items(cache.get_articles)
+    dt = gviz_api.DataTable([
+        ('post_date', 'datetime', 'Posted'),
+        ('poster', 'string', 'Poster'),
+        ('subject', 'string', 'Subject'),
+        ('message_id', 'string', 'ID')
+        ])
+    dt.LoadData(articles)
     self.start('200 OK', [('Content-type', 'application/json')])
-    yield json.dumps(articles)
+    yield dt.ToJSon(columns_order=['subject', 'post_date', 'poster', 'message_id'])
 
 
 if __name__ == '__main__':
