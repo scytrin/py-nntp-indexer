@@ -1,10 +1,9 @@
 import gviz_api
+import itty
 import json
 import logging
-from urlparse import parse_qs, urlparse
-import wsgiref
-from wsgiref.simple_server import make_server
-from wsgiref.util import FileWrapper
+from os.path import commonprefix
+import re
 
 from __init__ import Indexer
 
@@ -12,135 +11,150 @@ logging.basicConfig(format="%(levelname)s (%(processName)s:%(threadName)s) %(fil
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.DEBUG)
 
-class IndexServer:
-  @classmethod
-  def start(self, config_file='defaults.cfg'):
-    indexer = Indexer(config_file)
-    host = indexer.config.get('server', 'host')
-    port = indexer.config.getint('server', 'port')
-    def inject_indexer(environ, start_response):
-      environ['indexer'] = indexer
-      return self(environ, start_response)
-    make_server(host, port, inject_indexer).serve_forever()
+IDXR = None
 
-  def __init__(self, environ, start_response):
-    self.environ = environ
-    self.start = start_response
-    self.path_info = urlparse(self['PATH_INFO'])
-    self.query = parse_qs(self['QUERY_STRING'])
-    self._post_params = None
+def parse_tq(tq_str):
+  def prs(tq, stop, hsh, key, flag, regex, transform=None):
+    new_stop = stop
+    try:
+      new_stop = tq_str[:stop].rindex(flag)
+      match = re.search(regex, tq_str[new_stop:stop])
+      if match:
+        hsh[key] = transform(match) if transform else match.group(1)
+    except ValueError:
+      pass
+    return new_stop
 
-  def __getitem__(self, key):
-    return self.environ[key]
+  query = {}
+  stop = len(tq_str) # going backwards...
+  stop = prs(tq_str, stop, query, 'offset', 'offset', 'offset (\d+)',
+             lambda m: int(m.group(1)))
+  stop = prs(tq_str, stop, query, 'limit', 'limit', 'limit (\d+)',
+             lambda m: int(m.group(1)))
+  stop = prs(tq_str, stop, query, 'order', 'order by', 'order by (.+)',
+             lambda m: m.group(1).replace('`',''))
 
-  @property
-  def indexer(self):
-    return self['indexer']
+  LOG.debug((query, stop))
+  return query
 
-  @property
-  def post_params(self):
-    if not self._post_params:
-      self._post_params = {}
-      if self.environ['REQUEST_METHOD'].upper() == 'POST':
-        content_type = self.environ.get('CONTENT_TYPE', 'application/x-www-form-urlencoded')
-        if (content_type.startswith('application/x-www-form-urlencoded')
-            or content_type.startswith('multipart/form-data')):
-          try:
-            request_body_size = int(self.environ.get('CONTENT_LENGTH', 0))
-          except (ValueError):
-            request_body_size = 0
-          self._post_params = parse_qs(self['wsgi.input'].read(request_body_size))
-          LOG.debug(self._post_params)
-    return self._post_params
+def parse_tqx(tqx_str):
+  return dict( pair.split(':', 2) for pair in tqx_str.split(';') )
 
-  def params(self, key, *default, **kw):
-    which = kw.get('which', 0)
-    transform = kw.get('transform', lambda x: x)
-    params = map(transform, self.query.get(key, default))
-    if which is None:
-      return params
-    elif len(params) > which:
-      return params[which]
-    elif len(default) > which:
-      return default[which]
-    else:
-      return None
+def lcs(data):
+  substr = ''
+  if len(data) > 1 and len(data[0]) > 0:
+    for i in range(len(data[0])):
+      for j in range(len(data[0])-i+1):
+        if j > len(substr) and all(data[0][i:i+j] in x for x in data):
+          substr = data[0][i:i+j]
+  return substr
 
-  def __iter__(self):
-    if self['REQUEST_METHOD'] == 'POST' and self.path_info.path == '/':
-      return self.process_post()
-    elif self['REQUEST_METHOD'] == 'GET':
-      func_name = self.path_info.path.lstrip('/').split('/')[0]
-      if func_name == '':
-        func_name = 'index'
-      return getattr(self, func_name, self.err_404)()
-    else:
-      return err_405()
 
-  def process_post(self):
-    self.start('200 OK', [('Content-type', 'text/plain')])
-    if self.post_params.get('reload_groups', False):
-      self.indexer.update_groups()
-      yield "Reloading groups..."
-    if self.post_params.get('fetch_articles', False):
-      self.indexer.update_watched()
-      yield "Fetching articles of watched groups..."
-    if 'watch' in self.post_params:
-      with self.indexer.cache_connection as cache:
-        for group in self.post_params['watch']:
-          cache.set_watched(group, True)
-          yield "Watching %s" % group
-    if 'unwatch' in self.post_params:
-      with self.indexer.cache_connection as cache:
-        for group in self.post_params['unwatch']:
-          cache.set_watched(group, False)
-          yield "Not watching %s" % group
+@itty.get('/groups')
+def get_groups(request):
+  query = request.GET.get('query', '')
+  watched = request.GET.get('watched', '')
+  tqx = parse_tqx(request.GET.get('tqx', ''))
+  tq = parse_tq(request.GET.get('tq', ''))
 
-  def err_404(self):
-    self.start('404 Not Found', [('Content-Type', 'test/plain')])
-    yield 'nothing found!!!'
+  with IDXR.cache_connection as cache:
+    groups = cache.get_groups(group_name=query, watch=watched, **tq)
 
-  def err_405(self):
-    self.start('405 Method Not Allowed', [('Content-Type', 'test/plain')])
-    yield 'Not allowed!'
+  dt = gviz_api.DataTable([
+      ('watch', 'boolean', 'Watched'),
+      ('group_name', 'string', 'Name')
+      ])
+  dt.LoadData(groups)
+  return itty.Response(dt.ToJSonResponse(req_id=tqx.get('reqId', 0)),
+                       content_type='application/json')
 
-  def index(self):
-    self.start('200 OK', [('Content-type', 'text/html')])
-    return FileWrapper(open('index.html'))
+@itty.get('/articles')
+def get_articles(request):
+  query = request.GET.get('query', '')
+  tq = parse_tq(request.GET.get('tq', ''))
+  tqx = parse_tqx(request.GET.get('tqx', ''))
 
-  def find_items(self, func):
-    query = self.params('query', '', which=-1)
-    offset = self.params('page', 0, transform=int)
-    return func(query, offset)
+  with IDXR.cache_connection as cache:
+    articles = cache.get_articles(subject=query, **tq)
 
-  def groups(self):
-    with self.indexer.cache_connection as cache:
-      groups = self.find_items(cache.get_groups)
-    if not groups:
-      self.indexer._build_group_list()
-      with self.indexer.cache_connection as cache:
-        groups = self.find_items(cache.get_groups)
-    dt = gviz_api.DataTable([
-        ('watch', 'boolean', 'Watched'),
-        ('group_name', 'string', 'Name')
-        ])
-    dt.LoadData(groups)
-    self.start('200 OK', [('Content-type', 'application/json')])
-    yield dt.ToJSon()
+  subjects = [a[2] for a in articles]
+  LOG.debug(lcs(subjects))
+  LOG.debug(commonprefix(subjects))
 
-  def articles(self):
-    with self.indexer.cache_connection as cache:
-      articles = self.find_items(cache.get_articles)
-    dt = gviz_api.DataTable([
-        ('post_date', 'datetime', 'Posted'),
-        ('poster', 'string', 'Poster'),
-        ('subject', 'string', 'Subject'),
-        ('message_id', 'string', 'ID')
-        ])
-    dt.LoadData(articles)
-    self.start('200 OK', [('Content-type', 'application/json')])
-    yield dt.ToJSon(columns_order=['subject', 'post_date', 'poster', 'message_id'])
+  dt = gviz_api.DataTable([
+      ('post_date', 'datetime', 'Posted'),
+      ('poster', 'string', 'Poster'),
+      ('subject', 'string', 'Subject'),
+      ('message_id', 'string', 'ID')
+      ])
+  dt_order = ['subject', 'post_date', 'poster', 'message_id']
+  dt.LoadData(articles)
+  return itty.Response(dt.ToJSonResponse(req_id=tqx.get('reqId', 0),
+                                         columns_order=dt_order),
+                       content_type='application/json')
+
+@itty.get('/state')
+def get_state(request):
+  with IDXR.cache_connection as cache:
+    status = {
+      'jobs': IDXR.task_queue.qsize(),
+      'articles': cache.article_count(),
+      'groups': cache.group_count()
+    }
+  return itty.Response(json.dumps(status), content_type='application/json')
+
+@itty.get('/jobs')
+def get_jobs(request):
+  return str(IDXR.task_queue.qsize())
+
+
+@itty.get('/')
+def index(request):
+  return itty.serve_static_file(request, 'index.html')
+
+@itty.get('/(?P<filename>.*)')
+def index(request, filename):
+  return itty.serve_static_file(request, filename)
+
+
+@itty.post('/')
+def actions(request):
+  response = []
+
+  if request.POST.get('reload_groups', False):
+    IDXR.update_groups()
+    response.append("Reloading groups...")
+
+  fetch = request.POST.get('fetch', False)
+  if fetch and len(fetch) == 2:
+    LOG.debug(fetch)
+    IDXR.get_last(fetch[0], int(fetch[1]))
+    response.append("Fetching %s articles of %s..." % fetch)
+
+  if request.POST.get('fetch_articles', False):
+    IDXR.update_watched()
+    response.append( "Fetching articles of watched groups...")
+
+  if 'watch' in request.POST:
+    groups = request.POST['watch']
+    if not isinstance(groups, list): groups = [ groups ]
+    with IDXR.cache_connection as cache:
+      for group in groups:
+        cache.set_watched(group, True)
+        response.append( "Watching %s" % group)
+
+  if 'unwatch' in request.POST:
+    groups = request.POST['unwatch']
+    if not isinstance(groups, list): groups = [ groups ]
+    with IDXR.cache_connection as cache:
+      for group in groups:
+        cache.set_watched(group, False)
+        response.append( "Not watching %s" % group)
+  return itty.Response('\n'.join(response), content_type='text/plain')
 
 
 if __name__ == '__main__':
-  IndexServer.start()
+  IDXR = Indexer()
+  host = IDXR.config.get('server', 'host')
+  port = IDXR.config.getint('server', 'port')
+  itty.run_itty(host=host, port=port)

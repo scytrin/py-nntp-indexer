@@ -1,0 +1,116 @@
+<html>
+  <head>
+    <title>Use'dex</title>
+    <style type='text/css'>
+      form { display: inline; }
+      #status, #state { float: right; }
+    </style>
+    <script type="text/javascript" src="//www.google.com/jsapi"></script>
+    <script src="//ajax.googleapis.com/ajax/libs/jquery/1.8.3/jquery.min.js"></script>
+    <script src="//ajax.googleapis.com/ajax/libs/jqueryui/1.9.2/jquery-ui.min.js"></script>
+    <script src='/tqw.js'></script>
+    <script type='text/javascript'>
+// Oh Hai!
+google.load('visualization', '1', {'packages':['corechart','table','controls']});
+
+var STATE_UPDATE = null;
+var state_updater = function() {
+  $.getJSON('/state', function(json) {
+    var state = $('#state');
+    state.text('');
+    $.each(json, function(k,v) { state.text(state.text() + ' ' + k + ': ' + v); });
+    STATE_UPDATE = setTimeout(state_updater, 1000);
+  });
+};
+
+var groups = function() {
+  var query_url = document.location.origin + '/groups';
+  var query_str = $('#query_groups').serialize();
+  var query = new google.visualization.Query(query_url+'?'+query_str);
+  var display = document.getElementById('display');
+  var tqw = new TableQueryWrapper(query, display, {pageSize: 25, showRowNumber: false});
+  google.visualization.events.addListener(tqw.table, 'select', function() {
+    var data = [{
+      name: tqw.currentDataTable.getValue(tqw.table.getSelection()[0].row, 0) ? 'unwatch' : 'watch',
+      value: tqw.currentDataTable.getValue(tqw.table.getSelection()[0].row, 1)
+    }];
+    tqw.table.setSelection();
+    $.post('/', data, function() { tqw.sendAndDraw(); });
+  });
+  tqw.sendAndDraw();
+  return false;
+};
+
+
+
+var articleView = function(dataView) {
+  dataView.hideColumns([2,3]);
+};
+
+var articles = function() {
+  var query_url = document.location.origin + '/articles';
+  var query_str = $('#query_articles').serialize();
+  var query = new google.visualization.Query(query_url+'?'+query_str);
+  var display = document.getElementById('display');
+  var tqw = new TableQueryWrapper(query, display, {pageSize: 100, showRowNumber: false}, articleView);
+  tqw.sendAndDraw();
+  return false;
+};
+
+var init = function() {
+  jQuery.ajaxSetup({
+    beforeSend: function() {
+      $('#status').text('Loading...');
+    },
+    complete: function(){
+      $('#status').text('');
+    }
+  });
+
+  $("#fetch_articles1").click(function() {
+    $.post('/', {fetch_articles: true});
+  });
+
+  $('#fetch_articles').click(function() {
+    var group = prompt("what group?");
+    var count = prompt("how many?", 1000);
+    $.post('/', [{name: 'fetch', value: group}, {name:'fetch', value: parseInt(count)}]);
+  });
+
+  var reload_groups = function() {
+    $.post('/', {reload_groups: true}, groups);
+  };
+
+  STATE_UPDATE = setTimeout(state_updater, 1000)
+  $("#query_groups").submit(groups);
+  $("#query_articles").submit(articles);
+};
+
+google.setOnLoadCallback(init);
+    </script>
+  </head>
+  <body>
+    <div id='controls'>
+      <div id='state'></div>
+      <div id='status'></div>
+      <div>
+        <form id='query_articles'>
+          <input name='query' />
+          <button>Articles</button>
+          <label><input type='checkbox' name='grp_yenc' /> yEnc grouping</label>
+        </form>
+      </div>
+      <div>
+        <form id='query_groups'>
+          <input name='query' />
+          <button>Groups</button>
+          <label><input type='checkbox' name='watched' /> Watched</label>
+        </form>
+      </div>
+    </div>
+    <hr />
+    <div id='dashboard'></div>
+    <div id='filter'></div>
+    <div id='display'></div>
+  </body>
+</html>

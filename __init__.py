@@ -55,7 +55,9 @@ class Indexer:
 
   def update_watched(self):
     with self.cache_connection as cache:
+      LOG.debug(cache)
       for watched in cache.get_watched():
+        LOG.debug(watched)
         self.get_last(watched, 1000)
 
   def update_group(self, group):
@@ -74,6 +76,7 @@ class Indexer:
         self.add_task('fetch', group, start, end)
 
   def get_last(self, group, number):
+    LOG.debug((group, number))
     span = self.config.getint('indexer', 'xover_range')
     with self.nntp_connection as nntp:
       resp, count, first, last, group_name = nntp.group(group)
@@ -86,6 +89,7 @@ class Indexer:
 
 
   def add_task(self, *args):
+    LOG.debug(args)
     self.task_queue.put(args)
 
   def task_runner(self):
