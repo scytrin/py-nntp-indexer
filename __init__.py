@@ -2,24 +2,29 @@
 
 import ConfigParser
 from datetime import datetime, timedelta
+import xml.etree.ElementTree
 import logging
 from Queue import Queue
 import threading
 import time
 
-from cache import Cache
+from nzb import NZBBuilder
+from cache import Article, Group
 from nntp import Worker
 
 logging.basicConfig(format="%(levelname)s (%(processName)s:%(threadName)s) %(filename)s:%(lineno)d %(message)s")
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.DEBUG)
 
+
 class Indexer:
   def __init__(self, config_file='defaults.cfg'):
     self.config = ConfigParser.SafeConfigParser()
     self.config.readfp(open(config_file))
 
-    self.cache_connection._initialize()
+    cache.database.init(self.config.get('indexer', 'cache_file'))
+    if not Group.table_exists(): Group.create_table()
+    if not Article.table_exists(): Article.create_table()
 
     max_nntp = self.config.getint('indexer', 'max_connections')
     self.nntp_semaphore = threading.BoundedSemaphore(max_nntp)
@@ -46,23 +51,18 @@ class Indexer:
     #worker.set_debuglevel(1)
     return worker
 
-  @property
-  def cache_connection(self):
-    return Cache(self.config.get('indexer', 'cache_file'))
-
   def update_groups(self):
     self.add_task('update_groups', False)
 
-  def update_watched(self):
-    with self.cache_connection as cache:
-      LOG.debug(cache)
-      for watched in cache.get_watched():
-        LOG.debug(watched)
-        self.get_last(watched, 1000)
+  def update_watched(self, count=1000):
+    return # TODO!
+    for watched in Group.watched():
+      LOG.debug(watched)
+      self.get_last(watched, count)
 
   def update_group(self, group):
-    with self.cache_connection as cache:
-      last_read = cache.get_last_read(group)
+    cache = None
+    last_read = cache.get_last_read(group)
     last = 0
     span = self.config.getint('indexer', 'xover_range')
     with self.nntp_connection as nntp:
@@ -111,8 +111,7 @@ class Indexer:
   def _build_group_list(self, all=False):
     with self.nntp_connection as nntp:
       resp, groups = nntp.list()
-    with self.cache_connection as cache:
-      cache.add_groups(groups)
+    Group.add_from_nntplib(groups)
 
   def _fetch_group_articles(self, group, start, end):
     LOG.debug((group, start, end))
@@ -121,8 +120,7 @@ class Indexer:
       resp, articles = nntp.xover(str(start), str(end))
     LOG.debug(len(articles))
     if articles:
-      with self.cache_connection as cache:
-        cache.add_articles(group, articles)
+      Article.add_from_nntplib(group, articles)
 
 if __name__ == '__main__':
   app = Indexer('defaults.cfg')

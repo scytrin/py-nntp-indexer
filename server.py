@@ -1,11 +1,13 @@
 import gviz_api
-import itty
+import flask
+from flask import Flask, request
 import json
 import logging
 from os.path import commonprefix
 import re
 
 from __init__ import Indexer
+from cache_peewee import Group, Article
 
 logging.basicConfig(format="%(levelname)s (%(processName)s:%(threadName)s) %(filename)s:%(lineno)d %(message)s")
 LOG = logging.getLogger(__name__)
@@ -38,6 +40,8 @@ def parse_tq(tq_str):
   return query
 
 def parse_tqx(tqx_str):
+  if not tqx_str:
+    return dict()
   return dict( pair.split(':', 2) for pair in tqx_str.split(';') )
 
 def lcs(data):
@@ -50,111 +54,116 @@ def lcs(data):
   return substr
 
 
-@itty.get('/groups')
-def get_groups(request):
-  query = request.GET.get('query', '')
-  watched = request.GET.get('watched', '')
-  tqx = parse_tqx(request.GET.get('tqx', ''))
-  tq = parse_tq(request.GET.get('tq', ''))
+app = Flask(__name__)
 
-  with IDXR.cache_connection as cache:
-    groups = cache.get_groups(group_name=query, watch=watched, **tq)
+@app.route('/groups')
+def get_groups():
+  query = request.args.get('query', '')
+  watched = request.args.get('watched', '')
+  tqx = parse_tqx(request.args.get('tqx', ''))
+  tq = parse_tq(request.args.get('tq', ''))
 
-  dt = gviz_api.DataTable([
-      ('watch', 'boolean', 'Watched'),
-      ('group_name', 'string', 'Name')
-      ])
-  dt.LoadData(groups)
-  return itty.Response(dt.ToJSonResponse(req_id=tqx.get('reqId', 0)),
-                       content_type='application/json')
+  select = Group.select()
+  select = select.limit(tq.get('limit', 100))
+  select = select.offset(tq.get('offset', 0))
+  select = select.order_by(Group.name)
+  if query:
+    select = select.where(Group.name % ('*%s*' % query))
+  if watched:
+    select = select.where(Group.watch == True)
 
-@itty.get('/articles')
-def get_articles(request):
-  query = request.GET.get('query', '')
-  tq = parse_tq(request.GET.get('tq', ''))
-  tqx = parse_tqx(request.GET.get('tqx', ''))
+  dt = gviz_api.DataTable({
+      'name': ('string', 'Name'),
+      'watch': ('boolean', 'Watched')
+      })
+  dt_order = ['watch', 'name']
+  dt.LoadData( g._data for g in select )
+  gviz_json = dt.ToJSonResponse(req_id=tqx.get('reqId', 0),
+                                columns_order=dt_order)
 
-  with IDXR.cache_connection as cache:
-    articles = cache.get_articles(subject=query, **tq)
+  response = flask.make_response(gviz_json)
+  response.headers['Content-Type'] = 'application/json'
+  return response
 
-  subjects = [a[2] for a in articles]
+@app.route('/articles')
+def get_articles():
+  query = request.args.get('query', '')
+  tq = parse_tq(request.args.get('tq', ''))
+  tqx = parse_tqx(request.args.get('tqx', ''))
+
+  select = Article.select()
+  select = select.limit(tq.get('limit', 100))
+  select = select.offset(tq.get('offset', 0))
+  if query:
+    select = select.where(Article.subject % ('*%s*' % query))
+
+  subjects = [ a.subject for a in select ]
   LOG.debug(lcs(subjects))
   LOG.debug(commonprefix(subjects))
 
-  dt = gviz_api.DataTable([
-      ('post_date', 'datetime', 'Posted'),
-      ('poster', 'string', 'Poster'),
-      ('subject', 'string', 'Subject'),
-      ('message_id', 'string', 'ID')
-      ])
-  dt_order = ['subject', 'post_date', 'poster', 'message_id']
-  dt.LoadData(articles)
-  return itty.Response(dt.ToJSonResponse(req_id=tqx.get('reqId', 0),
-                                         columns_order=dt_order),
-                       content_type='application/json')
+  dt = gviz_api.DataTable({
+      'posted': ('datetime', 'Posted'),
+      'poster': ('string', 'Poster'),
+      'subject': ('string', 'Subject'),
+      'message_id': ('string', 'ID')
+      })
+  dt.LoadData( a._data for a in select )
+  dt_order = ['subject', 'posted', 'poster', 'message_id']
+  gviz_json = dt.ToJSonResponse(req_id=tqx.get('reqId', 0),
+                                columns_order=dt_order)
 
-@itty.get('/state')
-def get_state(request):
-  with IDXR.cache_connection as cache:
-    status = {
-      'jobs': IDXR.task_queue.qsize(),
-      'articles': cache.article_count(),
-      'groups': cache.group_count()
-    }
-  return itty.Response(json.dumps(status), content_type='application/json')
+  response = flask.make_response(gviz_json)
+  response.headers['Content-Type'] = 'application/json'
+  return response
 
-@itty.get('/jobs')
-def get_jobs(request):
-  return str(IDXR.task_queue.qsize())
+@app.route('/state')
+def get_state():
+  return flask.jsonify(jobs=IDXR.task_queue.qsize(),
+                       articles=Article.select().count(),
+                       groups=Group.select().count())
 
+@app.route('/<filename>')
+def serve(filename):
+  return flask.send_from_directory('static', filename)
 
-@itty.get('/')
-def index(request):
-  return itty.serve_static_file(request, 'index.html')
+@app.route('/')
+def index():
+  return serve('index.html')
 
-@itty.get('/(?P<filename>.*)')
-def index(request, filename):
-  return itty.serve_static_file(request, filename)
+@app.route('/rpc/<method>', methods=['POST'])
+def rpc_call(method):
+  LOG.debug(method)
+  LOG.debug(request.form)
 
-
-@itty.post('/')
-def actions(request):
-  response = []
-
-  if request.POST.get('reload_groups', False):
+  if method == 'reload_groups':
     IDXR.update_groups()
-    response.append("Reloading groups...")
 
-  fetch = request.POST.get('fetch', False)
-  if fetch and len(fetch) == 2:
-    LOG.debug(fetch)
-    IDXR.get_last(fetch[0], int(fetch[1]))
-    response.append("Fetching %s articles of %s..." % fetch)
-
-  if request.POST.get('fetch_articles', False):
-    IDXR.update_watched()
-    response.append( "Fetching articles of watched groups...")
-
-  if 'watch' in request.POST:
-    groups = request.POST['watch']
-    if not isinstance(groups, list): groups = [ groups ]
-    with IDXR.cache_connection as cache:
+  elif method == 'fetch':
+    groups = request.form.getlist('group')
+    count = request.form.get('count', 1000, type=int)
+    if not groups:
+      IDXR.update_watched()
+    else:
       for group in groups:
-        cache.set_watched(group, True)
-        response.append( "Watching %s" % group)
+        IDXR.get_last(group, count)
 
-  if 'unwatch' in request.POST:
-    groups = request.POST['unwatch']
-    if not isinstance(groups, list): groups = [ groups ]
-    with IDXR.cache_connection as cache:
-      for group in groups:
-        cache.set_watched(group, False)
-        response.append( "Not watching %s" % group)
-  return itty.Response('\n'.join(response), content_type='text/plain')
+  elif method == 'watch':
+    for group in request.form.getlist('group'):
+      Group.update(watch=True).where(Group.name == group).execute()
+
+  elif method == 'unwatch':
+    for group in request.form.getlist('group'):
+      Group.update(watch=False).where(Group.name == group).execute()
+
+  return ''
 
 
 if __name__ == '__main__':
   IDXR = Indexer()
+  if not Group.table_exists():
+    Group.create_table()
+  if not Article.table_exists():
+    Article.create_table()
   host = IDXR.config.get('server', 'host')
   port = IDXR.config.getint('server', 'port')
-  itty.run_itty(host=host, port=port)
+  app.run(host, port)
