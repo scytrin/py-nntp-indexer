@@ -1,12 +1,11 @@
 import datetime
 import email.utils
 import logging
-import peewee
-from threading import RLock
+import sqlite3
+import time
+from third_party import peewee
 
-logging.basicConfig(format="%(levelname)s (%(processName)s:%(threadName)s) %(filename)s:%(lineno)d %(message)s")
-LOG = logging.getLogger(__name__)
-LOG.setLevel(logging.DEBUG)
+LOG = logging.getLogger('py-usedex.cache')
 
 def _rfc2822_to_datetime(value):
   t = email.utils.parsedate_tz(value)
@@ -72,17 +71,23 @@ class Article(peewee.Model):
   @classmethod
   def add_from_nntplib(cls, group_name, articles):
     # ( (a_no, subject, poster, when, a_id, refs, sz, li), ... )
+    LOG.info("%s: %s to %s" % (group_name, articles[0][0], articles[-1][0]))
     group = Group.get_or_create(name=group_name)
-    LOG.debug((group, articles[0]))
     with database.transaction():
       for article in articles:
-        posted = _rfc2822_to_datetime(article[3])
-        article = Article.get_or_create(group=group,
-                                        number=article[0],
-                                        subject=article[1],
-                                        poster=article[2],
-                                        posted=posted,
-                                        message_id=article[4],
-                                        size=article[6])
-
-
+        data = dict(group=group,
+                    number=article[0],
+                    subject=article[1],
+                    poster=article[2],
+                    posted=_rfc2822_to_datetime(article[3]),
+                    message_id=article[4],
+                    size=article[6])
+        while True:
+          try: 
+            article = Article.get_or_create(**data)
+            break
+          except sqlite3.OperationalError as e:
+            LOG.debug(article[0])
+            LOG.error(e)
+            time.sleep(1.5)
+    LOG.info("%s: %s to %s" % (group_name, articles[0][0], articles[-1][0]))

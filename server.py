@@ -1,18 +1,18 @@
-import gviz_api
-import flask
-from flask import Flask, request
 import json
 import logging
+import os.path
 from os.path import commonprefix
 import re
 
 from __init__ import Indexer
-from cache_peewee import Group, Article
+from cache import Group, Article
 
-logging.basicConfig(format="%(levelname)s (%(processName)s:%(threadName)s) %(filename)s:%(lineno)d %(message)s")
-LOG = logging.getLogger(__name__)
-LOG.setLevel(logging.DEBUG)
+from third_party import itty
+from third_party import gviz_api as gviz
 
+LOG = logging.getLogger('py-usedex.server')
+
+STATIC_FILES = os.path.join(os.path.dirname(__file__), 'static')
 IDXR = None
 
 def parse_tq(tq_str):
@@ -54,17 +54,16 @@ def lcs(data):
   return substr
 
 
-app = Flask(__name__)
 
-@app.route('/groups')
-def get_groups():
-  query = request.args.get('query', '')
-  watched = request.args.get('watched', '')
-  tqx = parse_tqx(request.args.get('tqx', ''))
-  tq = parse_tq(request.args.get('tq', ''))
+@itty.get('/groups')
+def get_groups(request):
+  query = request.GET.get('query', '')
+  watched = request.GET.get('watched', '')
+  tqx = parse_tqx(request.GET.get('tqx', ''))
+  tq = parse_tq(request.GET.get('tq', ''))
 
   select = Group.select()
-  select = select.limit(tq.get('limit', 100))
+  select = select.limit(tq.get('limit', 1))
   select = select.offset(tq.get('offset', 0))
   select = select.order_by(Group.name)
   if query:
@@ -72,7 +71,7 @@ def get_groups():
   if watched:
     select = select.where(Group.watch == True)
 
-  dt = gviz_api.DataTable({
+  dt = gviz.DataTable({
       'name': ('string', 'Name'),
       'watch': ('boolean', 'Watched')
       })
@@ -81,18 +80,16 @@ def get_groups():
   gviz_json = dt.ToJSonResponse(req_id=tqx.get('reqId', 0),
                                 columns_order=dt_order)
 
-  response = flask.make_response(gviz_json)
-  response.headers['Content-Type'] = 'application/json'
-  return response
+  return itty.Response(gviz_json, content_type='application/json')
 
-@app.route('/articles')
-def get_articles():
-  query = request.args.get('query', '')
-  tq = parse_tq(request.args.get('tq', ''))
-  tqx = parse_tqx(request.args.get('tqx', ''))
+@itty.get('/articles')
+def get_articles(request):
+  query = request.GET.get('query', '')
+  tq = parse_tq(request.GET.get('tq', ''))
+  tqx = parse_tqx(request.GET.get('tqx', ''))
 
   select = Article.select()
-  select = select.limit(tq.get('limit', 100))
+  select = select.limit(tq.get('limit', 1))
   select = select.offset(tq.get('offset', 0))
   if query:
     select = select.where(Article.subject % ('*%s*' % query))
@@ -101,7 +98,7 @@ def get_articles():
   LOG.debug(lcs(subjects))
   LOG.debug(commonprefix(subjects))
 
-  dt = gviz_api.DataTable({
+  dt = gviz.DataTable({
       'posted': ('datetime', 'Posted'),
       'poster': ('string', 'Poster'),
       'subject': ('string', 'Subject'),
@@ -112,58 +109,67 @@ def get_articles():
   gviz_json = dt.ToJSonResponse(req_id=tqx.get('reqId', 0),
                                 columns_order=dt_order)
 
-  response = flask.make_response(gviz_json)
-  response.headers['Content-Type'] = 'application/json'
-  return response
+  return itty.Response(gviz_json, content_type='application/json')
 
-@app.route('/state')
-def get_state():
-  return flask.jsonify(jobs=IDXR.task_queue.qsize(),
-                       articles=Article.select().count(),
-                       groups=Group.select().count())
+@itty.get('/state')
+def get_state(request):
+  data = {
+      'jobs': IDXR.task_queue.qsize(),
+      'articles': Article.select().count(),
+      'groups': Group.select().count()
+  }
+  return itty.Response(json.dumps(data), content_type='application/json')
 
-@app.route('/<filename>')
-def serve(filename):
-  return flask.send_from_directory('static', filename)
+@itty.get('/')
+def index(request):
+  return serve(request, 'index.html')
 
-@app.route('/')
-def index():
-  return serve('index.html')
+@itty.get('/(?P<filename>[^/]+)')
+def serve(request, filename):
+  return itty.serve_static_file(request, filename, root=STATIC_FILES)
 
-@app.route('/rpc/<method>', methods=['POST'])
-def rpc_call(method):
-  LOG.debug(method)
-  LOG.debug(request.form)
 
-  if method == 'reload_groups':
-    IDXR.update_groups()
 
-  elif method == 'fetch':
-    groups = request.form.getlist('group')
-    count = request.form.get('count', 1000, type=int)
-    if not groups:
-      IDXR.update_watched()
-    else:
-      for group in groups:
-        IDXR.get_last(group, count)
-
-  elif method == 'watch':
-    for group in request.form.getlist('group'):
-      Group.update(watch=True).where(Group.name == group).execute()
-
-  elif method == 'unwatch':
-    for group in request.form.getlist('group'):
-      Group.update(watch=False).where(Group.name == group).execute()
-
+@itty.post('/rpc/fetch')
+def rpc_fetch(request):
+  count = int(request.POST.get('count', 1000))
+  groups = request.POST.get('group', [])
+  if not isinstance(groups, (list, tuple)):
+    groups = [ groups ]
+  if not groups:
+    IDXR.update_watched(count)
+  else:
+    for group in groups:
+      IDXR.get_last(group, count)
   return ''
+
+@itty.post('/rpc/watch')
+def rpc_watch(request):
+  groups = request.POST.get('group', [])
+  if not isinstance(groups, (list, tuple)):
+    groups = [ groups ]
+  for group in groups:
+    Group.update(watch=True).where(Group.name == group).execute()
+  return ''
+
+@itty.post('/rpc/unwatch')
+def rpc_unwatch(request):
+  groups = request.POST.get('group', [])
+  if not isinstance(groups, (list, tuple)):
+    groups = [ groups ]
+  for group in groups:
+    Group.update(watch=False).where(Group.name == group).execute()
+  return ''
+
+@itty.post('/rpc/reload_groups')
+def reload_groups(request):
+  IDXR.update_groups()
+  return ''
+
 
 
 if __name__ == '__main__':
   IDXR = Indexer()
-  if not Group.table_exists():
-    Group.create_table()
-  if not Article.table_exists():
-    Article.create_table()
   host = IDXR.config.get('server', 'host')
   port = IDXR.config.getint('server', 'port')
-  app.run(host, port)
+  itty.run_itty(host=host, port=port)

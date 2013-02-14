@@ -1,20 +1,50 @@
-#!/usr/bin/python2.7
-
 import ConfigParser
 from datetime import datetime, timedelta
-import xml.etree.ElementTree
 import logging
+import logging.handlers
+import nntplib
 from Queue import Queue
 import threading
 import time
+import xml.etree.ElementTree
+import sys
+import os.path
 
 from nzb import NZBBuilder
+import cache
 from cache import Article, Group
-from nntp import Worker
 
-logging.basicConfig(format="%(levelname)s (%(processName)s:%(threadName)s) %(filename)s:%(lineno)d %(message)s")
-LOG = logging.getLogger(__name__)
+
+LOG = logging.getLogger('py-usedex')
 LOG.setLevel(logging.DEBUG)
+def setup_logger(logger):
+  formatter = logging.Formatter("%(levelname)s %(name)s (%(processName)s:%(threadName)s) %(filename)s:%(lineno)d %(message)s")
+
+  file_handler = logging.FileHandler('log.log')
+  file_handler.setFormatter(formatter)
+  logger.addHandler(file_handler)
+
+  stde_handler = logging.StreamHandler()
+  stde_handler.setFormatter(formatter)
+  logger.addHandler(stde_handler)
+setup_logger(LOG)
+
+
+class Worker(nntplib.NNTP):
+  def __init__(self, semaphore, *args, **kw):
+    self.semaphore = semaphore
+    self.semaphore.acquire()
+    nntplib.NNTP.__init__(self, *args, **kw)
+
+  def __enter__(self):
+    return self
+
+  def __exit__(self, type, value, traceback):
+    self.quit()
+
+  def quit(self):
+    nntplib.NNTP.quit(self)
+    self.semaphore.release()
 
 
 class Indexer:
@@ -55,10 +85,9 @@ class Indexer:
     self.add_task('update_groups', False)
 
   def update_watched(self, count=1000):
-    return # TODO!
-    for watched in Group.watched():
-      LOG.debug(watched)
-      self.get_last(watched, count)
+    for group in Group.watched():
+      LOG.debug(group)
+      self.get_last(group.name, count)
 
   def update_group(self, group):
     cache = None

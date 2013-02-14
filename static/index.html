@@ -10,81 +10,65 @@
     <script src="//ajax.googleapis.com/ajax/libs/jquery/1.8.3/jquery.min.js"></script>
     <script src="//ajax.googleapis.com/ajax/libs/jqueryui/1.9.2/jquery-ui.min.js"></script>
     <script src='/tqw.js'></script>
+    <script src='/displayTable.js'></script>
     <script type='text/javascript'>
 // Oh Hai!
 google.load('visualization', '1', {'packages':['corechart','table','controls']});
 
-var STATE_UPDATE = null;
-var state_updater = function() {
-  $.getJSON('/state', function(json) {
-    var state = $('#state');
-    state.text('');
-    $.each(json, function(k,v) { state.text(state.text() + ' ' + k + ': ' + v); });
-    //STATE_UPDATE = setTimeout(state_updater, 1000);
-  });
-};
-
-var GROUP_TABLE = null;
-var groups = function() {
-  var query_url = document.location.origin + '/groups';
-  var query_str = $('#query_groups').serialize();
-  var query = new google.visualization.Query(query_url+'?'+query_str);
-  var display = document.getElementById('display');
-  GROUP_TABLE = new TableQueryWrapper(query, display,
-      {pageSize: 25, showRowNumber: false});
-  GROUP_TABLE.sendAndDraw();
-  return false;
+var fetch_articles = function() {
+  var count = parseInt(prompt("how many?", 1000));
+  if (!count) return;
+  var data = [{name: 'count', value: count}];
+  if (D_G.table != null) {
+    $.each(D_G.table.getSelection(), function(i,e) {
+      var group = D_G.viewTable.getValue(e.row, 1);
+      data.push({name: 'group', value: group });
+    });
+  }
+  $.post('/rpc/fetch', data);
 };
 
 var group_watch = function() {
-  var data = $.map(GROUP_TABLE.table.getSelection(), function(e) {
-    var group = GROUP_TABLE.currentDataTable.getValue(e.row, 1);
+  var data = $.map(D_G.table.getSelection(), function(e) {
+    var group = D_G.dataTable.getValue(e.row, 1);
     return {name: 'group', value: group };
   });
-  $.post('/rpc/watch', data, function() { GROUP_TABLE.sendAndDraw(); });
+  $.post('/rpc/watch', data, function() { D_G.sendAndDraw(); });
 };
 
 var group_unwatch = function() {
-  var data = $.map(GROUP_TABLE.table.getSelection(), function(e) {
-    var group = GROUP_TABLE.currentDataTable.getValue(e.row, 1);
+  var data = $.map(D_G.table.getSelection(), function(e) {
+    var group = D_G.dataTable.getValue(e.row, 1);
     return {name: 'group', value: group };
   });
-  $.post('/rpc/unwatch', data, function() { GROUP_TABLE.sendAndDraw(); });
-};
-
-var group_fetch = function() {
-  var data = $.map(GROUP_TABLE.table.getSelection(), function(e) {
-    var group = GROUP_TABLE.currentDataTable.getValue(e.row, 1);
-    return {name: 'group', value: group };
-  });
-  var count = prompt("how many?", 1000);
-  count = parseInt(count);
-  if (!count) return;
-  data.push({name: 'count', value: count});
-  $.post('/rpc/fetch', data, function() { GROUP_TABLE.sendAndDraw(); });
-};
-
-
-
-var articleView = function(dataView) {
-  dataView.hideColumns([2,3]);
-};
-
-var articles = function() {
-  var query_url = document.location.origin + '/articles';
-  var query_str = $('#query_articles').serialize();
-  var query = new google.visualization.Query(query_url+'?'+query_str);
-  var display = document.getElementById('display');
-  var tqw = new TableQueryWrapper(query, display, {pageSize: 100, showRowNumber: false}, articleView);
-  tqw.sendAndDraw();
-  return false;
+  $.post('/rpc/unwatch', data, function() { D_G.sendAndDraw(); });
 };
 
 var reload_groups = function() {
   $.post('/rpc/reload_groups');
 };
 
+var STATE_UPDATE = null;
+var state_updater = function() {
+  $.getJSON('/state', function(json) {
+    var state = $('#state');
+    state.text('');
+    var out = function(k,v) {
+      state.text(state.text() + ' ' + k + ': ' + v);
+    };
+    $.each(json, out);
+  });
+};
+
+var D_A = null;
+var D_G = null;
 var init = function() {
+  D_A = new DisplayTable('/articles', 'display', function(view) {
+    view.hideColumns([2,3]);
+  });
+
+  D_G = new DisplayTable('/groups', 'display');
+
   jQuery.ajaxSetup({
     beforeSend: function() {
       $('#status').text('Loading...');
@@ -94,18 +78,10 @@ var init = function() {
     }
   });
 
-  $('#fetch_articles').click(function() {
-    var group = prompt("what group?");
-    var count = prompt("how many?", 1000);
-    count = parseInt(count);
-    $.post('/rpc/fetch',
-      [ {name: 'group', value: group},
-        {name: 'count', value: count}]);
-  });
-
-  STATE_UPDATE = setInterval(state_updater, 1000)
-  $("#query_groups").submit(groups);
-  $("#query_articles").submit(articles);
+  //STATE_UPDATE = setInterval(state_updater, 1000)
+  $("#query_groups").submit(D_G.formSendAndDraw());
+  $("#query_articles").submit(D_A.formSendAndDraw());
+  $("#fetch_articles").click(fetch_articles);
   $("#group_reload").click(reload_groups);
 };
 
@@ -113,9 +89,9 @@ google.setOnLoadCallback(init);
     </script>
   </head>
   <body>
+    <div id='state'></div>
+    <div id='status'></div>
     <div id='controls'>
-      <div id='state'></div>
-      <div id='status'></div>
       <div>
         <form id='query_articles'>
           <input name='query' />
@@ -133,8 +109,7 @@ google.setOnLoadCallback(init);
       </div>
     </div>
     <hr />
-    <div id='dashboard'></div>
-    <div id='filter'></div>
+    <div id='actions'></div>
     <div id='display'></div>
   </body>
 </html>
