@@ -173,3 +173,5 @@ if __name__ == '__main__':
   host = IDXR.config.get('server', 'host')
   port = IDXR.config.getint('server', 'port')
   itty.run_itty(host=host, port=port)
+  LOG.info('waiting on %d tasks', IDXR.task_queue.qsize())
+  IDXR.task_queue.join()

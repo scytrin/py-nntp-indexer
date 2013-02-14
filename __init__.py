@@ -53,8 +53,8 @@ class Indexer:
     self.config.readfp(open(config_file))
 
     cache.database.init(self.config.get('indexer', 'cache_file'))
-    if not Group.table_exists(): Group.create_table()
-    if not Article.table_exists(): Article.create_table()
+    Group.create_table(True)
+    Article.create_table(True)
 
     max_nntp = self.config.getint('indexer', 'max_connections')
     self.nntp_semaphore = threading.BoundedSemaphore(max_nntp)
@@ -124,6 +124,7 @@ class Indexer:
   def task_runner(self):
     try:
       while True:
+        LOG.debug('%d tasks waiting' % self.task_queue.qsize())
         task = self.task_queue.get()
         LOG.debug(task)
         if task[0] == 'fetch':
