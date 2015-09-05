@@ -1,0 +1,115 @@
+<html>
+  <head>
+    <title>Use'dex</title>
+    <style type='text/css'>
+      form { display: inline; }
+      #status { float: right; }
+      #state { position:fixed; right:0; bottom:0; }
+    </style>
+    <script type="text/javascript" src="//www.google.com/jsapi"></script>
+    <script src="//ajax.googleapis.com/ajax/libs/jquery/1.8.3/jquery.min.js"></script>
+    <script src="//ajax.googleapis.com/ajax/libs/jqueryui/1.9.2/jquery-ui.min.js"></script>
+    <script src='/tqw.js'></script>
+    <script src='/displayTable.js'></script>
+    <script type='text/javascript'>
+// Oh Hai!
+google.load('visualization', '1', {'packages':['corechart','table','controls']});
+
+var fetch_articles = function() {
+  var count = parseInt(prompt("how many?", 1000));
+  if (!count) return;
+  var data = [{name: 'count', value: count}];
+  if (D_G.table != null) {
+    $.each(D_G.table.getSelection(), function(i,e) {
+      var group = D_G.viewTable.getValue(e.row, 1);
+      data.push({name: 'group', value: group });
+    });
+  }
+  $.post('/rpc/fetch', data);
+};
+
+var group_watch = function() {
+  var data = $.map(D_G.table.getSelection(), function(e) {
+    var group = D_G.dataTable.getValue(e.row, 1);
+    return {name: 'group', value: group };
+  });
+  $.post('/rpc/watch', data, function() { D_G.sendAndDraw(); });
+};
+
+var group_unwatch = function() {
+  var data = $.map(D_G.table.getSelection(), function(e) {
+    var group = D_G.dataTable.getValue(e.row, 1);
+    return {name: 'group', value: group };
+  });
+  $.post('/rpc/unwatch', data, function() { D_G.sendAndDraw(); });
+};
+
+var reload_groups = function() {
+  $.post('/rpc/reload_groups');
+};
+
+var STATE_UPDATE = null;
+var state_updater = function() {
+  $.getJSON('/state', function(json) {
+    var state = $('#state');
+    state.text('');
+    var out = function(k,v) {
+      state.text(state.text() + ' ' + k + ': ' + v);
+    };
+    $.each(json, out);
+  });
+};
+
+var D_A = null;
+var D_G = null;
+var init = function() {
+  D_A = new DisplayTable('/articles', 'display', function(view) {
+    view.hideColumns([2,3]);
+  });
+
+  D_G = new DisplayTable('/groups', 'display');
+
+  jQuery.ajaxSetup({
+    beforeSend: function() {
+      $('#status').text('Loading...');
+    },
+    complete: function(){
+      $('#status').text('');
+    }
+  });
+
+  //STATE_UPDATE = setInterval(state_updater, 1000)
+  $("#query_groups").submit(D_G.formSendAndDraw());
+  $("#query_articles").submit(D_A.formSendAndDraw());
+  $("#fetch_articles").click(fetch_articles);
+  $("#group_reload").click(reload_groups);
+};
+
+google.setOnLoadCallback(init);
+    </script>
+  </head>
+  <body>
+    <div id='state'></div>
+    <div id='status'></div>
+    <div id='controls'>
+      <div>
+        <form id='query_articles'>
+          <input name='query' />
+          <button>Articles</button>
+          <label><input type='checkbox' name='grp_yenc' /> yEnc grouping</label>
+        </form>
+        <button id='fetch_articles'>Fetch More</button>
+      </div>
+      <div>
+        <form id='query_groups'>
+          <input name='query' />
+          <button>Groups</button>
+          <label><input type='checkbox' name='watched' /> Watched</label>
+        </form>
+      </div>
+    </div>
+    <hr />
+    <div id='actions'></div>
+    <div id='display'></div>
+  </body>
+</html>
