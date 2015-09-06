@@ -35,3 +35,4 @@ nosetests.xml
 .pydevproject
 defaults.cfg
 nntp.db
+peewee
