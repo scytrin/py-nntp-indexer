@@ -6,7 +6,7 @@ import logging
 import time
 
 from dateutil import parser
-from peewee import peewee
+from third_party import peewee
 
 
 logging.basicConfig(format="%(levelname)s (%(threadName)s) %(filename)s:%(lineno)d %(message)s")
