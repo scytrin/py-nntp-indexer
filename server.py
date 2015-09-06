@@ -5,7 +5,7 @@ from os.path import commonprefix
 import re
 
 from __init__ import Indexer
-from cache import Group, Article
+from store import Group, Article
 
 from third_party import itty
 from third_party import gviz_api as gviz

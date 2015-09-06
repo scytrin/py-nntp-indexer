@@ -11,8 +11,7 @@ import sys
 import os.path
 
 from nzb import NZBBuilder
-import cache
-from cache import Article, Group
+from store import Article, Group
 
 
 LOG = logging.getLogger('py-usedex')
