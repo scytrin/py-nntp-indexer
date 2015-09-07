@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python2
 
 import logging
 import sys
@@ -36,9 +36,13 @@ def sync_articles(config):
         first = max(latest_article.number, int(first))
       LOG.info('Fetching from %d to %d' % (int(first), int(last)))
       # Look up the most recent article for this group and use over first
-      for article in nntp.xover_spans(first, last):
+      article_count = 0
+      for article in nntp.xover_spans_reversed(first, last):
+        article_count += 1
         article_inst = store.Article.from_nntp(group, article)
         LOG.info((article_inst[0].number, article_inst[0].subject))
+        if article_count >= 1000:
+          break
 
 
 def find_pattern(config):
@@ -74,11 +78,14 @@ def subjects(config):
   subjects = set()
   for group_name in config.get('groups'):
     group = store.Group.get_or_create(name=group_name)[0]
-    for article in group.articles:
-      if not article.subject_close_matches(subjects, 5):
-        LOG.info(article.subject)
+    for article in group.nzb_articles.order_by(store.Article.number):
+      LOG.info([len(subjects), article.subject])
+      matches = [a for a in article.subject_close_matches(subjects, 5)]
+      if not matches:
         subjects.add(article.subject)
-        time.sleep(2)
+  for subject in subjects:
+    print subject
+  print len(subjects)
 
 
 def main(argv):
@@ -86,7 +93,7 @@ def main(argv):
   store.setup()
   load_regexp()
 
-  if True:
+  if argv[2] == 'look':
     return subjects(config)
   elif argv[2] == 'sync':
     return sync_articles(config)
@@ -95,6 +102,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-  sys.argv.append('config.yaml')
-  sys.argv.append('find')
   main(sys.argv)

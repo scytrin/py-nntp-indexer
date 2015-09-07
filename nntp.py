@@ -36,7 +36,7 @@ class NNTP(nntplib.NNTP):
             self.welcome = self.shortcmd('mode reader')
         except nntplib.NNTPPermanentError:
             pass
-        except nntplib.NNTPTemporaryError, e:
+        except nntplib.NNTPTemporaryError as e:
             if user and e.response[:3] == '480':
                 readermode_afterauth = 1
             else:
@@ -77,6 +77,13 @@ class NNTP(nntplib.NNTP):
   def xover_spans(self, first, last):
     for start in xrange(int(first), int(last), self.span):
       end = start + (self.span - 1)
+      response = self.xover(str(start), str(end))
+      for article in response[1]:
+        yield article
+
+  def xover_spans_reversed(self, first, last):
+    for end in xrange(int(last), int(first), 0 - self.span):
+      start = end - (self.span - 1)
       response = self.xover(str(start), str(end))
       for article in response[1]:
         yield article

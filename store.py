@@ -60,8 +60,8 @@ class Article(BaseModel):
   def subject_close_matches(self, strings, tolerance=5):
     for match in difflib.get_close_matches(self.subject, strings):
       dist = len([d for d in difflib.ndiff(self.subject, match) if not d.startswith(' ')]) / 2
-      LOG.info([dist, match])
       if dist <= tolerance:
+        LOG.info([dist, match])
         yield dist, match
 
   @classmethod
