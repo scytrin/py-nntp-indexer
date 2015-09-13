@@ -1,0 +1,21 @@
+{comment} {seperator} {release} {files_b} {seperator} "{file_name}" {yenc} {parts_p}
+{comment} {files_b} {seperator} "{file_name}" {yenc} {parts_p}
+"{file_name}" {yenc} {parts_p}
+{file_name_parts_q} {yenc} {parts_p}
+{comment} {seperator} {file_name} {yenc} {parts_p}
+{comment} {seperator} {file_name} {seperator} {files_b} {seperator} {parts_p}
+{comment} {seperator} "{file_name}" {yenc} {parts_p}
+{release} "{file_name}" {parts_p} {yenc} \d+ Bytes
+{comment} {seperator} {files_b} {seperator} {file_name} {parts_p}
+{comment} {seperator} {release} {seperator} {files_b} {seperator} {file_name} {yenc} {parts_p}
+{comment} {seperator} {release} {seperator} {files_b} {seperator} "{file_name}" {seperator} {yenc} {parts_p}
+{release} {files_b} {seperator} {comment} "{file_name}" {yenc} {parts_p}
+{comment} {files_b} "{file_name}" {yenc} {parts_p}
+{comment} {seperator} {file_name} {parts_p}
+{comment} {file_name} {parts_p}
+{comment} {seperator} "{file_name} {parts_p}"
+{comment} {yenc} "{file_name}" {parts_p}
+{comment} {seperator} {yenc} "{file_name}" {parts_p}
+{comment}"{file_name}" {parts_p}
+{comment} {seperator} "{file_name}" {parts_p} \d+\.\d+ MBytes {yenc}
+{comment} {parts_b}

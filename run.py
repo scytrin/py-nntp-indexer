@@ -1,12 +1,17 @@
 #!/usr/bin/python2
 
+import itertools
 import logging
+from pprint import pformat
+import re
 import sys
+import threading
 import time
 import yaml
 
-from nntp import NNTP
+import nntp
 import store
+
 
 
 logging.basicConfig(format="%(levelname)s (%(threadName)s) %(filename)s:%(lineno)d %(message)s")
@@ -14,91 +19,83 @@ LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.DEBUG)
 
 
-def load_regexp():
-  store.Matcher.delete().execute()
-  for line in open('regex', 'rb'):
-    group_name, pattern = eval('(' + line + ')')
-    if group_name.endswith('.*'):
-      group_name = group_name[:-1] + '%'
-    elif not group_name:
-      group_name = None
-    matcher = store.Matcher.create_or_get(
-      group_name=group_name, pattern=pattern)[0]
+def load_regexp(regexp_file):
+  mappings = {
+    'comment': r'(?P<comment>.+?)',
+    'release': r'(?P<release_name>.+?)',
+    'yenc': r'yEnc',
+    'seperator': r'(?:-|\||\|\|)',
+    'parts_p': r'\((?P<part_number>\d+)(?:\/| of )(?P<part_total>\d+)\)',
+    'parts_b': r'\[(?P<part_number>\d+)(?:\/| of )(?P<part_total>\d+)\]',
+    'files_b': r'\[(?P<file_number>\d+)(?:\/| of )(?P<file_total>\d+)\]',
+    'file_name_parts_q': r'"(?P<file_name>.+\.part(?P<file_number>\d+)\.rar)"',
+    'file_name': r'(?P<file_name>[^"]+)',
+  }
+  for lineno, line in enumerate(open(regexp_file, 'rb')):
+    if line.strip() and not line.startswith('#'):
+      pattern = line.strip().format(**mappings)
+      m = store.AddMatcher(pattern, group_glob='*', description=str(lineno+1))
 
 
-def sync_articles(config):
-  with NNTP.Connect(config.get('servers')[0]) as nntp:
-    for group_name in config.get('groups'):
-      group = store.Group.get_or_create(name=group_name)[0]
-      group_resp, count, first, last, name = nntp.group(group.name)
-      latest_article = group.latest_article
-      if latest_article:
-        first = max(latest_article.number, int(first))
-      LOG.info('Fetching from %d to %d' % (int(first), int(last)))
-      # Look up the most recent article for this group and use over first
-      article_count = 0
-      for article in nntp.xover_spans_reversed(first, last):
-        article_count += 1
-        article_inst = store.Article.from_nntp(group, article)
-        LOG.info((article_inst[0].number, article_inst[0].subject))
-        if article_count >= 1000:
-          break
+def sync_articles(server, group_name, stop_event):
+  LOG.info((server, group_name))
+  with server.connection as connection:
+    group_resp, count, first, last, name = connection.group(group_name)
+    # Look up the most recent article for this group and use over first
+    first = max(int(first), store.GroupIndex.last_for_group(group_name))
+    article_count = 0
+    articles = connection.xover_span(group_name, first, last)
+    while not stop_event.is_set():
+      nntp_article = articles.next()
+      store.AddArticleFromNNTP(group_name, nntp_article)
 
 
-def find_pattern(config):
+def sync(config):
+  servers = [nntp.Factory(server) for server in config.get('servers')]
+  sync_threads = set()
+  stop_sync_event = threading.Event()
   for group_name in config.get('groups'):
-    group = store.Group.get_or_create(name=group_name)[0]
-    LOG.info((group.name, group.articles.count(), group.matchers.count()))
-    for matcher in group.matchers:
-      q = group.articles.where(store.Article.subject.regexp(matcher.pattern))
-      LOG.info(q)
-      for article in q:
-        LOG.info(article)
+    sync_name = 'Sync[%s:%s]' % (servers[0].host, group_name)
+    sync_thread = threading.Thread(target=sync_articles,
+      args=(servers[0], group_name, stop_sync_event),
+      name=sync_name)
+    sync_thread.daemon = True
+    sync_thread.start()
+    sync_threads.add(sync_thread)
+
+  try:
+    while any(thread.is_alive() for thread in sync_threads):
+      time.sleep(10)
+  except KeyboardInterrupt as kbd_err:
+    stop_sync_event.set()
+    while any(thread.is_alive() for thread in sync_threads):
+      LOG.info('waiting...')
+      time.sleep(0.5)
 
 
-def find_diff(config):
-  for group_name in config.get('groups'):
-    groupings = {}
-    group = store.Group.get_or_create(name=group_name)[0]
-    for article in group.articles:
-      LOG.info([0, article.subject])
-      matches = [m for m in article.subject_close_matches(groupings, 3)]
-      if len(matches) == 1:
-        groupings[matches[0][1]].append(article.number)
-        continue
-      elif matches:
-        LOG.warn([len(matches), article.subject])
-        raise RuntimeError('Many close matches!')
-        #LOG.debug(matches)
-      LOG.warn('NO CLOSE MATCHES FOUND')
-      groupings[article.subject] = [article.number]
-
-
-def subjects(config):
-  subjects = set()
-  for group_name in config.get('groups'):
-    group = store.Group.get_or_create(name=group_name)[0]
-    for article in group.nzb_articles.order_by(store.Article.number):
-      LOG.info([len(subjects), article.subject])
-      matches = [a for a in article.subject_close_matches(subjects, 5)]
-      if not matches:
-        subjects.add(article.subject)
-  for subject in subjects:
-    print subject
-  print len(subjects)
+def match():
+  for entry in store.GroupIndex.select().join(store.Article):
+    for matcher in store.MatchersForGroup(entry.name):
+      match = matcher.pattern.match(entry.article.subject)
+      if match:
+        #print out
+        break
+    if not match:
+      LOG.debug('NO MATCH! %s', entry.article.subject)
 
 
 def main(argv):
-  config = yaml.load(open(argv[1]))
-  store.setup()
-  load_regexp()
+  try:
+    config = yaml.load(open('config.yaml'))
+    store.setup()
+    load_regexp(config['regexp_file'])
 
-  if argv[2] == 'look':
-    return subjects(config)
-  elif argv[2] == 'sync':
-    return sync_articles(config)
-  elif argv[2] == 'find':
-    return find_pattern(config)
+    #sync(config)
+    match()
+
+  except KeyboardInterrupt as kbd_err:
+    pass
+
 
 
 if __name__ == "__main__":

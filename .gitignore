@@ -34,5 +34,7 @@ nosetests.xml
 .project
 .pydevproject
 defaults.cfg
-nntp.db
-peewee
+
+# OTHER
+thisrd_party
+.c9revisions
