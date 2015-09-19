@@ -48,12 +48,15 @@ def sync_articles(server, group_name, write_lock, stop_event):
     for nntp_article in articles:
       nntp_article = [decode_if_str(f) for f in nntp_article]
 
-      with write_lock:
-        article = store.Article.addFromNNTP(nntp_article)
-        article.addGroupIndex(group_name, nntp_article[0])
-        for match in article.getSegmentData():
-          article.addSegment(match)
-          break
+      with store.peewee_db.atomic():
+        with write_lock:
+          article = store.Article.addFromNNTP(nntp_article)
+        with write_lock:
+          article.addGroupIndex(group_name, nntp_article[0])
+          for match in article.getSegmentData():
+            with write_lock:
+              article.addSegment(match)
+              break
 
       if stop_event.is_set():
         break
@@ -62,13 +65,12 @@ def sync_articles(server, group_name, write_lock, stop_event):
 
 def sync(config):
   sync_threads = set()
-  db_write_lock = threading.RLock()
   stop_sync_event = threading.Event()
   servers = [nntp.NNTP.FromConfig(server) for server in config.get('servers')]
   for group_name in config.get('groups'):
     sync_name = 'Sync[%s:%s]' % (servers[0].host, group_name)
     sync_thread = threading.Thread(target=sync_articles,
-      args=(servers[0], group_name, db_write_lock, stop_sync_event),
+      args=(servers[0], group_name, store.peewee_lock, stop_sync_event),
       name=sync_name)
     #sync_thread.daemon = True
     sync_thread.start()
@@ -88,7 +90,9 @@ def main(argv):
   try:
     config = yaml.load(open('config.yaml'))
     store.LoadMatchers(open(config['regexp_file'], 'rb'))
-    sync(config)
+    for m in store.Matchers:
+      print m.description, m.pattern.pattern
+    #sync(config)
   except KeyboardInterrupt as kbd_err:
     pass
 

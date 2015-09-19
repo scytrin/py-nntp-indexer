@@ -26,33 +26,29 @@ LOG.setLevel(logging.DEBUG)
 
 
 MatcherMacros = {
+  'size': r'\d+(?:[.]\d+)? MBytes|\d+ [Bb]ytes',
   'comment': r'(?P<comment>.+?)',
   'release': r'(?P<release_name>.+?)',
-  'yenc': r'yEnc',
   'seperator': r'(?:-|\||\|\|)',
-  'parts_p': r'\((?P<part_number>\d+)(?:\/| of )(?P<part_total>\d+)\)',
-  'parts_b': r'\[(?P<part_number>\d+)(?:\/| of )(?P<part_total>\d+)\]',
+  'parts_p': r'\((?P<part_number>\d+)(?:\/| ?of ?)(?P<part_total>\d+)\)',
+  'parts_b': r'\[(?P<part_number>\d+)(?:\/| ?of ?)(?P<part_total>\d+)\]',
   'files_b': r'\[(?P<file_number>\d+)(?:\/| ?of ?)(?P<file_total>\d+)\]',
-  'files': r'\d+(?: ?of ?|\/)\d+',
+  'files': r'(?P<file_number>\d+)(?:\/| ?of ?)(?P<file_total>\d+)',
+  'parts': r'(?P<part_number>\d+)(?:\/| ?of ?)(?P<part_total>\d+)',
   'file_name_parts': r'(?P<file_name>.+\.part(?P<file_number>\d+)\.rar)',
   'file_name': r'(?P<file_name>[^"]+)',
 }
-Matcher = collections.namedtuple('Matcher', ['pattern', 'group_glob', 'description'])
+Matcher = collections.namedtuple('Matcher', ['pattern', 'description'])
 Matchers = list()
 
 def LoadMatchers(iterable):
-  for lineno, line in enumerate(iterable):
+  for idx, line in enumerate(iterable):
     if line.strip() and not line.startswith('#'):
       pattern = line.strip().format(**MatcherMacros)
-      AddMatcher(pattern, group_glob='*', description=str(lineno+1))
-
-def AddMatcher(pattern, group_glob, description):
-  matcher = Matcher(re.compile('^' + pattern + '$', re.I), group_glob, description)
-  if matcher not in Matchers:
-    Matchers.append(matcher)
-
-def MatchersForGroup(group_name):
-  return [m for m in Matchers if fnmatch.fnmatch(group_name, m.group_glob)]
+      LOG.info((idx, pattern))
+      matcher = Matcher(re.compile('^' + pattern + '$', re.I), str(idx+1))
+      if matcher not in Matchers:
+        Matchers.append(matcher)
 
 
 peewee_lock = threading.RLock()
