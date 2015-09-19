@@ -51,9 +51,9 @@ def sync_articles(server, group_name, write_lock, stop_event):
       with write_lock:
         article = store.Article.addFromNNTP(nntp_article)
         article.addGroupIndex(group_name, nntp_article[0])
-        match = article.findMatch()
-        if match:
-          article.addSegment(match.groupdict())
+        for match in article.getSegmentData():
+          article.addSegment(match)
+          break
 
       if stop_event.is_set():
         break

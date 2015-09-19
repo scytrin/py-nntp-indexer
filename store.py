@@ -92,11 +92,11 @@ class Article(BaseModel):
       number=int(number),
       article=self)[0]
 
-  def findMatch(self):
+  def getSegmentData(self):
     for matcher in Matchers:
       match = matcher.pattern.match(self.subject)
       if match:
-        return match.groupdict()
+        yield match.groupdict()
 
   def addSegment(self, segment_data):
     file_name = segment_data.get('file_name', '').strip()
@@ -182,3 +182,7 @@ class Segment(BaseModel):
     q = Segment.release_file_parts(self.release_name, self.file_name)
     parts = set(s.part_number for s in q.select(Segment.part_number))
     return [n+1 for n in xrange(self.part_total) if n+1 not in parts]
+
+
+for table in (Article, GroupIndex, Segment):
+  table.create_table(fail_silently=True)
