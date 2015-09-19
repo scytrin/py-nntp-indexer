@@ -86,8 +86,7 @@ def sync(config):
 
 def main(argv):
   try:
-    config = yaml.load(open('config.yaml'))
-    store.setup()
+    config = yaml.load(open('config.yaml'))-
     store.LoadMatchers(open(config['regexp_file'], 'rb'))
     sync(config)
   except KeyboardInterrupt as kbd_err:
