@@ -2,11 +2,11 @@
 
 import collections
 import datetime
-import difflib
 import fnmatch
 import hashlib
 import logging
 import re
+import threading
 import time
 
 from dateutil import parser
@@ -25,21 +25,26 @@ LOG.setLevel(logging.DEBUG)
 #logging.getLogger('peewee').setLevel(logging.DEBUG)
 
 
-
-def AddArticleFromNNTP(group_name, nntp_article):
-  #a_no, subject, poster, when, a_id, refs, size, lines = article
-  article, a_created = Article.add_from_nntp(group_name, nntp_article)
-  group_index, g_created = GroupIndex.add_from_nntp(group_name, nntp_article)
-  return
-  for matcher in Matcher.for_group(group_name):
-    match = matcher.pattern.match(nntp_article[1])
-    if match:
-      segment, s_created = Segment.add_from_nntp(
-        group_name, nntp_article, match.groupdict())
-
-
+MatcherMacros = {
+  'comment': r'(?P<comment>.+?)',
+  'release': r'(?P<release_name>.+?)',
+  'yenc': r'yEnc',
+  'seperator': r'(?:-|\||\|\|)',
+  'parts_p': r'\((?P<part_number>\d+)(?:\/| of )(?P<part_total>\d+)\)',
+  'parts_b': r'\[(?P<part_number>\d+)(?:\/| of )(?P<part_total>\d+)\]',
+  'files_b': r'\[(?P<file_number>\d+)(?:\/| ?of ?)(?P<file_total>\d+)\]',
+  'files': r'\d+(?: ?of ?|\/)\d+',
+  'file_name_parts': r'(?P<file_name>.+\.part(?P<file_number>\d+)\.rar)',
+  'file_name': r'(?P<file_name>[^"]+)',
+}
 Matcher = collections.namedtuple('Matcher', ['pattern', 'group_glob', 'description'])
 Matchers = list()
+
+def LoadMatchers(iterable):
+  for lineno, line in enumerate(iterable):
+    if line.strip() and not line.startswith('#'):
+      pattern = line.strip().format(**MatcherMacros)
+      AddMatcher(pattern, group_glob='*', description=str(lineno+1))
 
 def AddMatcher(pattern, group_glob, description):
   matcher = Matcher(re.compile('^' + pattern + '$', re.I), group_glob, description)
@@ -50,56 +55,59 @@ def MatchersForGroup(group_name):
   return [m for m in Matchers if fnmatch.fnmatch(group_name, m.group_glob)]
 
 
+peewee_lock = threading.RLock()
+peewee_db = peewee.SqliteDatabase('nntp.db', threadlocals=True)
 
-peewee_db = peewee.SqliteDatabase('articles.db', threadlocals=True)
-
-def setup():
-  peewee_db.connect()
-  for table in [GroupIndex, Article, Segment]:
-    #table.drop_table(fail_silently=True)
-    table.create_table(fail_silently=True)
 
 class BaseModel(peewee.Model):
   class Meta:
-      database = peewee_db
+    database = peewee_db
 
 
 class Article(BaseModel):
+  #a_no, subject, poster, when, a_id, refs, size, lines = article
   identifier = peewee.TextField(primary_key=True, null=False)
   poster = peewee.TextField(null=False)
   posted = peewee.DateTimeField(null=False)
   subject = peewee.TextField(null=False)
-
-  def subject_close_matches(self, strings, tolerance=5):
-    for match in difflib.get_close_matches(self.subject, strings):
-      dist = len([d for d in difflib.ndiff(self.subject, match) if not d.startswith(' ')]) / 2
-      if dist <= tolerance:
-        LOG.info([dist, match])
-        yield dist, match
+  size = peewee.BigIntegerField(null=False, default=0)
 
   @classmethod
-  def decode(self, string):
-    encodings = ('ascii', 'latin-1', 'cp037')
-    for encoding in encodings:
-      try:
-        return unicode(string, encoding)
-      except UnicodeDecodeError:
-        LOG.info('Encoding failure: %s %s', string, encoding)
-        pass
-
+  def unmatched(cls):
+    unmatched = cls.select().join(Segment, peewee.JOIN.LEFT_OUTER)
+    return unmatched.where(Segment.article == None)
 
   @classmethod
-  def add_from_nntp(cls, group_name, nntp_article):
-    try:
-      return cls.create_or_get(**{
-        'subject': cls.decode(nntp_article[1]),
-        'poster': cls.decode(nntp_article[2]),
-        'posted': parser.parse(nntp_article[3]),
-        'identifier': nntp_article[4]
-      })
-    except UnicodeDecodeError as err:
-      LOG.error('%s: %s %s', type(err), group_name, repr(nntp_article))
-      raise err
+  def addFromNNTP(cls, nntp_article):
+    return Article.create_or_get(
+      subject=nntp_article[1],
+      poster=nntp_article[2],
+      posted=parser.parse(nntp_article[3]),
+      identifier=nntp_article[4],
+      size=int(nntp_article[6]))[0]
+
+  def addGroupIndex(self, name, number):
+    return GroupIndex.create_or_get(
+      name=name,
+      number=int(number),
+      article=self)[0]
+
+  def findMatch(self):
+    for matcher in Matchers:
+      match = matcher.pattern.match(self.subject)
+      if match:
+        return match.groupdict()
+
+  def addSegment(self, segment_data):
+    file_name = segment_data.get('file_name', '').strip()
+    return Segment.create_or_get(
+      article=self,
+      file_name=file_name,
+      release_name=segment_data.get('release_name', file_name),
+      file_total=int(segment_data.get('file_total', 0)),
+      file_number=int(segment_data.get('file_number', 0)),
+      part_total=int(segment_data.get('part_total', 0)),
+      part_number=int(segment_data.get('part_number', 0)))[0]
 
 
 class GroupIndex(BaseModel):
@@ -109,14 +117,6 @@ class GroupIndex(BaseModel):
 
   class Meta:
     primary_key = peewee.CompositeKey('name', 'number')
-
-  @classmethod
-  def add_from_nntp(cls, group_name, nntp_article):
-    return cls.create_or_get(**{
-      'name': group_name,
-      'number': int(nntp_article[0]),
-      'article': nntp_article[4],
-    })
 
   @classmethod
   def last_for_group(cls, group_name):
@@ -138,19 +138,6 @@ class Segment(BaseModel):
       self.file_name, self.file_number, self.file_total,
       self.part_number, self.part_total)
     return super(Segment, self).__str__().replace(segment_str[-1], segment_str)
-
-  @classmethod
-  def add_from_nntp(cls, group_name, nntp_article, segment_data):
-    file_name = segment_data.get('file_name').strip()
-    segment, s_created = cls.create_or_get(**{
-      'release_name': segment_data.get('release_name', file_name),
-      'file_name': file_name,
-      'article': nntp_article[4],
-      'file_total': int(segment_data.get('file_total', 1)),
-      'file_number': int(segment_data.get('file_number', 1)),
-      'part_total': int(segment_data.get('part_total', 1)),
-      'part_number': int(segment_data.get('part_number', 1)),
-    })
 
   @classmethod
   def release_list(cls):

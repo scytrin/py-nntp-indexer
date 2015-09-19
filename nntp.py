@@ -7,130 +7,146 @@ import socket
 import ssl
 import threading
 
-
 logging.basicConfig(format="%(levelname)s (%(threadName)s) %(filename)s:%(lineno)d %(message)s")
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.DEBUG)
 
+DEFAULT_XOVER_SPAN = 100
+DEFAULT_NNTP_PORT = 119
+DEFAULT_CONNECTIONS = 1
 
-class Factory(object):
-  def __init__(self, config):
-    self.host = config['host']
-    self.port = config['port']
-    self.user = config.get('username')
-    self.password = config.get('password')
-    self.readermode = True
-    self.usenetrc = True
-    self.is_ssl = config.get('ssl', False)
-    self.xover_span = config.get('xover_span', 100)
-    self.connections = config.get('connections', 1)
+LONGRESP = ['100', '215', '220', '221', '222', '224', '230', '231', '282']
+CRLF = '\r\n'
 
-    self._connections_semaphore = threading.BoundedSemaphore(self.connections)
+class NNTP(nntplib.NNTP):
+  @classmethod
+  def FromConfig(cls, config):
+    return cls(
+      config['host'], config.get('port', DEFAULT_NNTP_PORT),
+      config.get('username'), config.get('password'),
+      True, True, config.get('ssl', False),
+      config.get('xover_span', DEFAULT_XOVER_SPAN),
+      config.get('connections', DEFAULT_CONNECTIONS))
+
+  def __init__(self, host, port, user=None, password=None,
+               readermode=None, usenetrc=True, is_ssl=False, xover_span=None,
+               max_connections=None):
+    self.host = host
+    self.port = port
+    self.user = user
+    self.password = password
+    self.readermode = readermode
+    self.usenetrc = usenetrc
+    self.is_ssl = is_ssl
+    self.xover_span_width = int(xover_span or DEFAULT_XOVER_SPAN)
+    self._connections_semaphore = threading.BoundedSemaphore(max_connections or DEFAULT_CONNECTIONS)
+    self._authentication = lambda: self.__authenticate(user, password)
+    self.__thread_local = threading.local()
+    self.__thread_local.sock = None
+    self.__thread_local.file = None
+    self.__thread_local.welcome = None
+
+    self.debugging = 0
+
+  def __str__(self):
+    return '<NNTP %s %i>' % (self.host, self.port)
 
   @property
-  def connection(self):
-    return self._Connection(
-      self.host, self.port, self.user, self.password,
-      readermode=True, usenetrc=True,
-      is_ssl=self.is_ssl, xover_span=self.xover_span)
-
-  class _Connection(nntplib.NNTP):
-    """Intended to be used with the with statement!"""
-    def __init__(self, host, port=nntplib.NNTP_PORT, user=None, password=None,
-                 readermode=None, usenetrc=True, is_ssl=False, xover_span=None,
-                 semaphore=None):
-      self.host = host
-      self.port = port
-      self.user = user
-      self.password = password
-      self.xover_span_width = int(xover_span) or 100
-      self.debugging = 0
-      self.readermode = readermode
-      self.usenetrc = usenetrc
-      self.semaphore = semaphore or threading.BoundedSemaphore()
-
-      self.is_ssl = is_ssl
-      self.sock = None
-      self.file = None
-      self.welcome = None
-
-    def connect(self, user=None, password=None):
-      user = user or self.user
-      password = password or self.password
-
-      self.sock = socket.create_connection((self.host, self.port))
+  def sock(self):
+    if getattr(self.__thread_local, 'sock', None) is None:
+      LOG.debug('opening socket to %s %i', self.host, self.port)
+      sock = socket.create_connection((self.host, self.port))
       if self.is_ssl:
-        self.sock = ssl.wrap_socket(self.sock)
-      self.file = self.sock.makefile('rb')
-      self.welcome = self.getresp()
+        sock = ssl.wrap_socket(sock)
+      self.__thread_local.sock = sock
+    return self.__thread_local.sock
 
-      readermode_afterauth = 0
-      if self.readermode:
-          try:
-              self.welcome = self.shortcmd('mode reader')
-          except nntplib.NNTPPermanentError:
-              # error 500, probably 'not implemented'
-              pass
-          except nntplib.NNTPTemporaryError, e:
-              if user and e.response[:3] == '480':
-                  # Need authorization before 'mode reader'
-                  readermode_afterauth = 1
-              else:
-                  raise
-      # If no login/password was specified, try to get them from ~/.netrc
-      # Presume that if .netc has an entry, NNRP authentication is required.
-      try:
-          if self.usenetrc and not user:
-              import netrc
-              credentials = netrc.netrc()
-              auth = credentials.authenticators(self.host)
-              if auth:
-                  user = auth[0]
-                  password = auth[2]
-      except IOError:
-          pass
-      # Perform NNRP authentication if needed.
-      if user:
-          resp = self.shortcmd('authinfo user '+user)
-          if resp[:3] == '381':
-              if not password:
-                  raise nntplib.NNTPReplyError(resp)
-              else:
-                  resp = self.shortcmd(
-                          'authinfo pass '+password)
-                  if resp[:3] != '281':
-                      raise nntplib.NNTPPermanentError(resp)
-          if readermode_afterauth:
-              try:
-                  self.welcome = self.shortcmd('mode reader')
-              except nntplib.NNTPPermanentError:
-                  # error 500, probably 'not implemented'
-                  pass
+  @property
+  def file(self):
+    if getattr(self.__thread_local, 'file', None) is None:
+      LOG.debug('opening file for %s %i : %s', self.host, self.port, self.sock)
+      self.__thread_local.file = self.sock.makefile('rb')
+    return self.__thread_local.file
 
-    def __enter__(self):
-      self.semaphore.acquire()
-      self.connect()
-      return self
+  @property
+  def welcome(self):
+    return self.__thread_local.welcome
 
-    def __exit__(self, exec_type, exec_val, exec_traceback):
-      self.quit()
-      self.semaphore.release()
-      return False
+  def __enter__(self):
+    LOG.info('connecting to %s:%i', self.host, self.port)
+    self._connections_semaphore.acquire(True)
 
-    def _range_spans(x, y, span):
-      first = min(int(x), int(y))
-      last = max(int(x), int(y))
-      for start in xrange(first, last, span):
-        yield str(start), str(min(last, start + span - 1))
+    # Commiting some magic here
+    self.__thread_local.welcome = self.getresp()
 
-    def xover_span(self, group_name, first, last):
-      first = int(first)
-      last = int(last)
-      self.group(group_name)
-      for page in itertools.count(1, 150):
-        start = min(last, first + page * self.xover_span_width)
-        end = min(last, first + (page + 1) * self.xover_span_width)
-        LOG.info('Fetching %i to %i (%i) from %s', start, end, page, group_name)
-        response = self.xover(str(start), str(end))
-        for article in response[1]:
-          yield article
+    self._authentication()
+    return self
+
+  def __exit__(self, exec_type, exec_val, exec_traceback):
+    self.file.close()
+    self.sock.close()
+    self.__thread_local.file = None
+    self.__thread_local.sock = None
+
+    self._connections_semaphore.release()
+    return False
+
+  def __authenticate(self, user, password):
+    readermode_afterauth = 0
+    if self.readermode:
+        try:
+            self.__thread_local.welcome = self.shortcmd('mode reader')
+        except nntplib.NNTPPermanentError:
+            # error 500, probably 'not implemented'
+            pass
+        except nntplib.NNTPTemporaryError, e:
+            if user and e.response[:3] == '480':
+                # Need authorization before 'mode reader'
+                readermode_afterauth = 1
+            else:
+                raise
+    # If no login/password was specified, try to get them from ~/.netrc
+    # Presume that if .netc has an entry, NNRP authentication is required.
+    try:
+        if self.usenetrc and not user:
+            import netrc
+            credentials = netrc.netrc()
+            auth = credentials.authenticators(self.host)
+            if auth:
+                user = auth[0]
+                password = auth[2]
+    except IOError:
+        pass
+    # Perform NNRP authentication if needed.
+    if user:
+        resp = self.shortcmd('authinfo user '+user)
+        if resp[:3] == '381':
+            if not password:
+                raise nntplib.NNTPReplyError(resp)
+            else:
+                resp = self.shortcmd(
+                        'authinfo pass '+password)
+                if resp[:3] != '281':
+                    raise nntplib.NNTPPermanentError(resp)
+        if readermode_afterauth:
+            try:
+                self.__thread_local.welcome = self.shortcmd('mode reader')
+            except nntplib.NNTPPermanentError:
+                # error 500, probably 'not implemented'
+                pass
+
+  def xover_span(self, group_name, start, end):
+    start, end = int(start), int(end)
+    top = max(start, end)
+    starts = xrange(start, end, self.xover_span_width)
+    if start > end:
+      starts = reversed(starts)
+
+    LOG.debug('Grabbing articles [%i-%i] from %s', start, end, group_name)
+    self.group(group_name)
+    for low in itertools.islice(starts, 0, None, 150):
+      high = min(top, low + self.xover_span_width - 1)
+      LOG.debug('Fetching [%i-%i] from %s', low, high, group_name)
+      response = self.xover(str(low), str(high))
+      for article in response[1]:
+        yield article

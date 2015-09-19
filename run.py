@@ -9,6 +9,8 @@ import threading
 import time
 import yaml
 
+import memory_profiler
+
 import nntp
 import store
 
@@ -19,47 +21,56 @@ LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.DEBUG)
 
 
-def load_regexp(regexp_file):
-  mappings = {
-    'comment': r'(?P<comment>.+?)',
-    'release': r'(?P<release_name>.+?)',
-    'yenc': r'yEnc',
-    'seperator': r'(?:-|\||\|\|)',
-    'parts_p': r'\((?P<part_number>\d+)(?:\/| of )(?P<part_total>\d+)\)',
-    'parts_b': r'\[(?P<part_number>\d+)(?:\/| of )(?P<part_total>\d+)\]',
-    'files_b': r'\[(?P<file_number>\d+)(?:\/| of )(?P<file_total>\d+)\]',
-    'file_name_parts_q': r'"(?P<file_name>.+\.part(?P<file_number>\d+)\.rar)"',
-    'file_name': r'(?P<file_name>[^"]+)',
-  }
-  for lineno, line in enumerate(open(regexp_file, 'rb')):
-    if line.strip() and not line.startswith('#'):
-      pattern = line.strip().format(**mappings)
-      m = store.AddMatcher(pattern, group_glob='*', description=str(lineno+1))
+def decode_if_str(string):
+  if not isinstance(string, str):
+    return string
+  try:
+    return unicode(string, 'ascii')
+  except UnicodeDecodeError:
+    for encoding in ('latin-1', 'cp037'):
+      try:
+        u_str = unicode(string, encoding)
+        LOG.debug('Encoding success: %s %s', encoding, repr(u_str))
+        return u_str
+      except UnicodeDecodeError:
+        LOG.warn('Encoding failure: %s %s', encoding, repr(string))
+    return unicode(string, 'ascii', 'replace')
 
 
-def sync_articles(server, group_name, stop_event):
-  LOG.info((server, group_name))
-  with server.connection as connection:
-    group_resp, count, first, last, name = connection.group(group_name)
+def sync_articles(server, group_name, write_lock, stop_event):
+  LOG.info('Sync starting for %s on %s', group_name, server)
+  with server as nntp:
+    group_resp, count, first, last, name = nntp.group(group_name)
     # Look up the most recent article for this group and use over first
     first = max(int(first), store.GroupIndex.last_for_group(group_name))
     article_count = 0
-    articles = connection.xover_span(group_name, first, last)
-    while not stop_event.is_set():
-      nntp_article = articles.next()
-      store.AddArticleFromNNTP(group_name, nntp_article)
+    articles = nntp.xover_span(group_name, first, last)
+    for nntp_article in articles:
+      nntp_article = [decode_if_str(f) for f in nntp_article]
+
+      with write_lock:
+        article = store.Article.addFromNNTP(nntp_article)
+        article.addGroupIndex(group_name, nntp_article[0])
+        match = article.findMatch()
+        if match:
+          article.addSegment(match.groupdict())
+
+      if stop_event.is_set():
+        break
+  LOG.info('Sync finished for %s on %s', group_name, server)
 
 
 def sync(config):
-  servers = [nntp.Factory(server) for server in config.get('servers')]
   sync_threads = set()
+  db_write_lock = threading.RLock()
   stop_sync_event = threading.Event()
+  servers = [nntp.NNTP.FromConfig(server) for server in config.get('servers')]
   for group_name in config.get('groups'):
     sync_name = 'Sync[%s:%s]' % (servers[0].host, group_name)
     sync_thread = threading.Thread(target=sync_articles,
-      args=(servers[0], group_name, stop_sync_event),
+      args=(servers[0], group_name, db_write_lock, stop_sync_event),
       name=sync_name)
-    sync_thread.daemon = True
+    #sync_thread.daemon = True
     sync_thread.start()
     sync_threads.add(sync_thread)
 
@@ -73,26 +84,12 @@ def sync(config):
       time.sleep(0.5)
 
 
-def match():
-  for entry in store.GroupIndex.select().join(store.Article):
-    for matcher in store.MatchersForGroup(entry.name):
-      match = matcher.pattern.match(entry.article.subject)
-      if match:
-        #print out
-        break
-    if not match:
-      LOG.debug('NO MATCH! %s', entry.article.subject)
-
-
 def main(argv):
   try:
     config = yaml.load(open('config.yaml'))
     store.setup()
-    load_regexp(config['regexp_file'])
-
-    #sync(config)
-    match()
-
+    store.LoadMatchers(open(config['regexp_file'], 'rb'))
+    sync(config)
   except KeyboardInterrupt as kbd_err:
     pass
 
@@ -100,3 +97,18 @@ def main(argv):
 
 if __name__ == "__main__":
   main(sys.argv)
+
+
+
+"""
+import store
+store.LoadMatchers(open('regexp.txt', 'rb'))
+for article in store.Article.unmatched().iterator():
+  for matcher in store.Matchers:
+    match = matcher.pattern.match(article.subject)
+    if match:
+      article.addSegment(match.groupdict())
+      break
+
+
+"""
