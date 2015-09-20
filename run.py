@@ -40,17 +40,17 @@ def _decode_if_str(string):
 
 
 def _compress_ints(ints, initial=None,  func=tuple):
+  iset = interval.IntervalSet()
   last = None
-  intervalset = interval.IntervalSet()
   for curr in sorted(set(ints)):
     if initial is None:
       last = curr
       initial = curr
-    if abs(last - curr) > 1:
-      intervalset.add(interval.Interval.between(initial, last))
+    if last - curr == 1:
+      i |= interval.IntervalSet.between(initial, last))
       initial = curr
     last = curr
-  intervalset.add(interval.Interval.between(initial, last))
+  i |= interval.IntervalSet.between(initial, last))
   return intervalset
 
 
