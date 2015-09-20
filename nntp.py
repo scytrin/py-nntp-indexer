@@ -144,7 +144,7 @@ class NNTP(nntplib.NNTP):
 
     LOG.debug('Grabbing articles [%i-%i] from %s', start, end, group_name)
     self.group(group_name)
-    for low in itertools.islice(starts, 0, None, 150):
+    for low in starts:
       high = min(top, low + self.xover_span_width - 1)
       LOG.debug('Fetching [%i-%i] from %s', low, high, group_name)
       response = self.xover(str(low), str(high))

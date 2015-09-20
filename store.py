@@ -107,12 +107,13 @@ class Article(BaseModel):
 
 
 class GroupIndex(BaseModel):
+  server = peewee.TextField(null=False)
   name = peewee.TextField(null=False)
   number = peewee.BigIntegerField(null=False)
   article = peewee.ForeignKeyField(Article, null=False, related_name='group_indexes')
 
   class Meta:
-    primary_key = peewee.CompositeKey('name', 'number')
+    primary_key = peewee.CompositeKey('server', 'name', 'number')
 
   @classmethod
   def last_for_group(cls, group_name):
@@ -187,3 +188,4 @@ class Segment(BaseModel):
 for table in (Article, GroupIndex, Segment):
   peewee_db.connect()
   table.create_table(fail_silently=True)
+  

@@ -1,8 +1,11 @@
 #!/usr/bin/python2
 
+import collections
+import interval
 import itertools
 import logging
 from pprint import pformat
+import Queue
 import re
 import sys
 import threading
@@ -15,13 +18,12 @@ import nntp
 import store
 
 
-
 logging.basicConfig(format="%(levelname)s (%(threadName)s) %(filename)s:%(lineno)d %(message)s")
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.DEBUG)
 
 
-def decode_if_str(string):
+def _decode_if_str(string):
   if not isinstance(string, str):
     return string
   try:
@@ -37,69 +39,95 @@ def decode_if_str(string):
     return unicode(string, 'ascii', 'replace')
 
 
-def sync_articles(server, group_name, write_lock, stop_event):
-  LOG.info('Sync starting for %s on %s', group_name, server)
-  with server as nntp:
-    group_resp, count, first, last, name = nntp.group(group_name)
-    # Look up the most recent article for this group and use over first
-    first = max(int(first), store.GroupIndex.last_for_group(group_name))
-    article_count = 0
-    articles = nntp.xover_span(group_name, first, last)
-    for nntp_article in articles:
-      nntp_article = [decode_if_str(f) for f in nntp_article]
+def _compress_ints(ints, initial=None,  func=tuple):
+  last = None
+  intervalset = interval.IntervalSet()
+  for curr in sorted(set(ints)):
+    if initial is None:
+      last = curr
+      initial = curr
+    if abs(last - curr) > 1:
+      intervalset.add(interval.Interval.between(initial, last))
+      initial = curr
+    last = curr
+  intervalset.add(interval.Interval.between(initial, last))
+  return intervalset
 
-      with store.peewee_db.atomic():
-        with write_lock:
-          article = store.Article.addFromNNTP(nntp_article)
-        with write_lock:
-          article.addGroupIndex(group_name, nntp_article[0])
-          for match in article.getSegmentData():
-            with write_lock:
-              article.addSegment(match)
-              break
 
-      if stop_event.is_set():
+def ArticleQueueProcessor(exit_event, queue):
+  while not exit_event.is_set():
+    try:
+      group_name, nntp_article = queue.get_nowait()
+      #LOG.debug(nntp_article)
+      article = store.Article.addFromNNTP(nntp_article)
+      article.addGroupIndex(group_name, nntp_article[0])
+      for match in article.getSegmentData():
+        article.addSegment(match)
         break
-  LOG.info('Sync finished for %s on %s', group_name, server)
+      queue.task_done()
+    except Queue.Empty as err:
+      time.sleep(3)
 
 
-def sync(config):
-  sync_threads = set()
-  stop_sync_event = threading.Event()
+def QueueArticlesFromServer(exit_event, queue, group_name, server):
+  LOG.info('Queueing articles from %s on %s', group_name, server)
+  q = store.GroupIndex.select(store.GroupIndex.number)
+  q = q.where(store.GroupIndex.name == group_name)
+  article_nums = _compress_ints(i[0] for i in q.tuples())
+  LOG.info(article_nums)
+
+  with server as nntp:
+    group_resp, count, g_first, g_last, name = nntp.group(group_name)
+    LOG.info((group_name, g_first, g_last, len(article_nums)))
+    all_articles = interval.IntervalSet.between(int(g_first), int(g_last))
+    missing_articles = all_articles - article_nums
+    LOG.debug(missing_articles)
+    for intv in missing_articles:
+      articles = nntp.xover_span(group_name, intv.lower_bound, intv.upper_bound)
+      for nntp_article in articles:
+        queue.put((group_name, [_decode_if_str(f) for f in nntp_article]))
+        if exit_event.is_set():
+          break
+  LOG.info('Finished queueing articles from %s on %s', group_name, server)
+
+
+def sync(exit_event, config):
+  article_queue = Queue.Queue()
   servers = [nntp.NNTP.FromConfig(server) for server in config.get('servers')]
+
+  article_sync = threading.Thread(
+    target=ArticleQueueProcessor,
+    args=(exit_event, article_queue),
+    name='ArticleQueueProcessor')
+  article_sync.start()
+
   for group_name in config.get('groups'):
-    sync_name = 'Sync[%s:%s]' % (servers[0].host, group_name)
-    sync_thread = threading.Thread(target=sync_articles,
-      args=(servers[0], group_name, store.peewee_lock, stop_sync_event),
-      name=sync_name)
+    sync_thread = threading.Thread(target=QueueArticlesFromServer,
+      args=(exit_event, article_queue, group_name, servers[0]),
+      name='Sync[%s]' % group_name)
     #sync_thread.daemon = True
     sync_thread.start()
-    sync_threads.add(sync_thread)
 
-  try:
-    while any(thread.is_alive() for thread in sync_threads):
-      time.sleep(10)
-  except KeyboardInterrupt as kbd_err:
-    stop_sync_event.set()
-    while any(thread.is_alive() for thread in sync_threads):
+  while threading.active_count() > 1:
+    if exit_event.is_set():
       LOG.info('waiting...')
+      LOG.debug(threading.enumerate())
       time.sleep(0.5)
-
-
-def main(argv):
-  try:
-    config = yaml.load(open('config.yaml'))
-    store.LoadMatchers(open(config['regexp_file'], 'rb'))
-    for m in store.Matchers:
-      print m.description, m.pattern.pattern
-    sync(config)
-  except KeyboardInterrupt as kbd_err:
-    pass
-
+    else:
+      try:
+        time.sleep(10)
+      except KeyboardInterrupt as kbd_err:
+        exit_event.set()
 
 
 if __name__ == "__main__":
-  main(sys.argv)
+  config = yaml.load(open('config.yaml'))
+  store.LoadMatchers(open(config['regexp_file'], 'rb'))
+  exit_event = threading.Event()
+  try:
+    sync(exit_event, config)
+  except KeyboardInterrupt as kbd_err:
+    pass
 
 
 
