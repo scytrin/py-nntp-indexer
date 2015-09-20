@@ -61,7 +61,6 @@ class BaseModel(peewee.Model):
 
 
 class Article(BaseModel):
-  #a_no, subject, poster, when, a_id, refs, size, lines = article
   identifier = peewee.TextField(primary_key=True, null=False)
   poster = peewee.TextField(null=False)
   posted = peewee.DateTimeField(null=False)
@@ -75,6 +74,7 @@ class Article(BaseModel):
 
   @classmethod
   def addFromNNTP(cls, nntp_article):
+    #a_no, subject, poster, when, a_id, refs, size, lines = article
     return Article.create_or_get(
       subject=nntp_article[1],
       poster=nntp_article[2],
@@ -136,6 +136,21 @@ class Segment(BaseModel):
     return super(Segment, self).__str__().replace(segment_str[-1], segment_str)
 
   @classmethod
+  def integrity_check(cls, release_name):
+    rel_q = cls.select(cls.file_name).where(cls.release_name == release_name)
+    rel_qo = rel_qo.order_by(cls.file_name, cls.part_number)
+    integrity = {}
+    for file_part_segment in rel_q.iterator():
+      fil_q = rel_q.where(cls.file_name == file_segment.file_name)
+      fil_qo = fil_q.order_by(cls.file_number, cls.part_number)
+      missing = set(xrange(1, q.get().part_total+1))
+      for part_segment in fil_qo.iterator():
+        missing.discard(part_segment.part_number)
+      if missing:
+        LOG.info('Missing parts for "%s": %s', file_segment.file_name)
+        return False
+
+  @classmethod
   def release_list(cls):
     q = cls.select(cls.release_name)
     q = q.group_by(cls.release_name)
@@ -157,17 +172,6 @@ class Segment(BaseModel):
     q = q.order_by(cls.file_number, cls.part_number)
     return q
 
-  @classmethod
-  def integrity_check(cls, release_name):
-    rel_q = cls.select(cls.file_name).where(cls.release_name == release_name)
-    for file_segment in rel_q.order_by(cls.file_name):
-      file_name = file_segment.file_name
-      q = Segment.release_file_parts(release_name, file_name)
-      parts = set(s.part_number for s in q.select(Segment.part_number))
-      missing = set(xrange(1, q.get().part_total+1)) - parts
-      if any(missing):
-        return False
-
   @property
   def release_posted(self):
     q = Segment.select().where(Segment.release_name == self.release_name).join(Article)
@@ -181,4 +185,5 @@ class Segment(BaseModel):
 
 
 for table in (Article, GroupIndex, Segment):
+  peewee_db.connect()
   table.create_table(fail_silently=True)

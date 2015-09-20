@@ -1,36 +1,36 @@
-{comment} {seperator} {release} {seperator} \[{files}\] {seperator} "{file_name}" {seperator} yEnc \({parts}\)
-{comment} {seperator} {release} {seperator} \[{files}\] {seperator} {file_name} yEnc \({parts}\)
-{comment} {seperator} {release} \[{files}\] {seperator} "{file_name}" yEnc \({parts}\)
-{comment} {seperator} {file_name} {seperator} \[{files}\] {seperator} \({parts}\)
-{comment} \[{files}\] {seperator} {release} "{file_name}" yEnc \({parts}\)
-{comment} \[{files}\] {seperator} "{file_name}" yEnc \({parts}\)
+{release} {seperator} {comment} {seperator} \[{files}\] {seperator} "{file_name}" {seperator} yEnc \({parts}\)
+{release} {seperator} {comment} {seperator} \[{files}\] {seperator} {file_name} yEnc \({parts}\)
+{release} {seperator} {comment} \[{files}\] {seperator} "{file_name}" yEnc \({parts}\)
+{release} {seperator} {file_name} {seperator} \[{files}\] {seperator} \({parts}\)
+{release} \[{files}\] {seperator} {comment} "{file_name}" yEnc \({parts}\)
+{release} \[{files}\] {seperator} "{file_name}" yEnc \({parts}\)
 "{file_name}" yEnc \({parts}\)
 {file_name_parts} yEnc \({parts}\)
-{comment} {seperator} {file_name} yEnc \({parts}\)
-{comment} {seperator} "{file_name}" yEnc \({parts}\)
+{release} {seperator} {file_name} yEnc \({parts}\)
+{release} {seperator} "{file_name}" yEnc \({parts}\)
 {release} "{file_name}" \({parts}\) yEnc {size}
-{comment} {seperator} \[{files}\] {seperator} {file_name} \({parts}\)
-{comment} \[{files}\] "{file_name}" yEnc \({parts}\)
-{comment} {seperator} {file_name} \({parts}\)
-{comment} {file_name} \({parts}\)
-{comment} {seperator} "{file_name} \({parts}\)"
-{comment} yEnc "{file_name}" \({parts}\)
-{comment} {seperator} yEnc "{file_name}" \({parts}\)
-{comment}"{file_name}" \({parts}\)
-{comment} {seperator} "{file_name}" \({parts}\) {size} yEnc
-{comment} "{file_name}" yEnc \({parts}\) {size} +{seperator}\[{files}\]
-{comment} {seperator} \[{files}\] {seperator} {file_name} \({parts}\)
-{comment} {seperator} "{file_name}" yEnc \({parts}\) \[\d+K\]
-{comment} "{file_name}" yEnc \({parts}\) {size}  {seperator} \[{files}\]
-{comment} {seperator} {file_name} \({parts}\) \(yEnc\)
-{comment} {seperator} {release} {seperator} "{file_name}" \({parts}\) {size}
+{release} {seperator} \[{files}\] {seperator} {file_name} \({parts}\)
+{release} \[{files}\] "{file_name}" yEnc \({parts}\)
+{release} {seperator} {file_name} \({parts}\)
+{release} {file_name} \({parts}\)
+{release} {seperator} "{file_name} \({parts}\)"
+{release} yEnc "{file_name}" \({parts}\)
+{release} {seperator} yEnc "{file_name}" \({parts}\)
+{release}"{file_name}" \({parts}\)
+{release} {seperator} "{file_name}" \({parts}\) {size} yEnc
+{release} "{file_name}" yEnc \({parts}\) {size} +{seperator}\[{files}\]
+{release} {seperator} \[{files}\] {seperator} {file_name} \({parts}\)
+{release} {seperator} "{file_name}" yEnc \({parts}\) \[\d+K\]
+{release} "{file_name}" yEnc \({parts}\) {size}  {seperator} \[{files}\]
+{release} {seperator} {file_name} \({parts}\) \(yEnc\)
+{release} {seperator} {comment} {seperator} "{file_name}" \({parts}\) {size}
 {file_name_parts} \({parts}\)
-{file_name_parts}{comment} \({parts}\)
-{file_name_parts} \[{parts}\] {comment}
+{file_name_parts}{release} \({parts}\)
+{file_name_parts} \[{parts}\] {release}
 {file_name} \[{parts}\]
 {file_name} (\({parts}\))
-"{file_name_parts}" \[{parts}\] yEnc {comment}
-"{file_name}" \[{parts}\] yEnc {comment}
+"{file_name_parts}" \[{parts}\] yEnc {release}
+"{file_name}" \[{parts}\] yEnc {release}
 {release} {seperator} "{file_name}" \[{parts}\] yEnc {comment}
 {release} \[{files}\] {seperator} {file_name} \({parts}\) {seperator} {comment}
 "{file_name} \({parts}\)

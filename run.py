@@ -92,7 +92,7 @@ def main(argv):
     store.LoadMatchers(open(config['regexp_file'], 'rb'))
     for m in store.Matchers:
       print m.description, m.pattern.pattern
-    #sync(config)
+    sync(config)
   except KeyboardInterrupt as kbd_err:
     pass
 
