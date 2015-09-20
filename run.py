@@ -47,11 +47,11 @@ def _compress_ints(ints, initial=None,  func=tuple):
       last = curr
       initial = curr
     if last - curr == 1:
-      i |= interval.IntervalSet.between(initial, last))
+      iset |= interval.IntervalSet.between(initial, last)
       initial = curr
     last = curr
-  i |= interval.IntervalSet.between(initial, last))
-  return intervalset
+  iset |= interval.IntervalSet.between(initial, last)
+  return iset
 
 
 def ArticleQueueProcessor(exit_event, queue):
